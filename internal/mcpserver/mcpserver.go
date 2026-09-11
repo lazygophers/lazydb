@@ -292,7 +292,7 @@ func cachedNodes(ctx context.Context, h *hub, c *conn.Conn, path source.Path) ([
 }
 
 func cachedJSON[T any](ctx context.Context, h *hub, c *conn.Conn, path source.Path, kind string, pull func(context.Context) (T, error)) (v T, fromCache bool, err error) {
-	if e, ok, gerr := h.store.Get(ctx, c.Key(), path, kind); gerr == nil && ok {
+	if e, ok, gerr := h.store.Get(ctx, c.Key(), path, kind); gerr == nil && ok && time.Since(e.FetchedAt) < cache.DefaultTTL {
 		if jerr := json.Unmarshal(e.Payload, &v); jerr == nil {
 			return v, true, nil
 		}

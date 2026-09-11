@@ -309,7 +309,6 @@ func (c *client) call(ctx context.Context, method string, params any, out any) e
 	defer c.wmu.Unlock()
 	c.rmu.Lock()
 	c.last = time.Now()
-	c.dead = c.dead || false
 	c.rmu.Unlock()
 
 	c.nextID++

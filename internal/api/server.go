@@ -320,7 +320,7 @@ func headerIface(cols []string) []interface{} {
 }
 
 // recordExec 历史与审计共用一条记录（#23）。写失败不拦回包。
-func (s *server) recordExec(source, connID, sql string, d time.Duration, err error) {
+func (s *server) recordExec(caller, connID, sql string, d time.Duration, err error) {
 	if s.hist == nil && s.aud == nil {
 		return
 	}
@@ -332,7 +332,7 @@ func (s *server) recordExec(source, connID, sql string, d time.Duration, err err
 		e.Err = err.Error()
 	}
 	_ = s.hist.Save(context.Background(), e)
-	_ = s.aud.Log(source, e)
+	_ = s.aud.Log(caller, e)
 }
 
 // ---- 搜索（#23：内存索引，断网走缓存 stale-fallback） ----
