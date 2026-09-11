@@ -30,6 +30,7 @@ func New(m *conn.Manager, cs *cache.Store, token string) http.Handler {
 	mux.HandleFunc("GET /api/connections/{id}/ddl", s.ddl)
 	mux.HandleFunc("GET /api/connections/{id}/capabilities", s.capabilities)
 	mux.HandleFunc("POST /api/connections/{id}/refresh", s.refresh)
+	mux.HandleFunc("POST /api/test-connection", s.testConnection)
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -303,6 +304,32 @@ func (s *server) capabilities(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- helpers ----
+
+// testConnection 不登记连接、只验证凭据能否打开并 Ping（「测试连接」按钮）。
+func (s *server) testConnection(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Cfg source.Config `json:"config"`
+	}
+	if err := decode(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	src, err := s.m.Open(req.Cfg)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if err := src.Open(r.Context(), req.Cfg); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	defer src.Close()
+	if err := src.Ping(r.Context()); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
 
 func (s *server) getConn(w http.ResponseWriter, r *http.Request) (*conn.Conn, bool) {
 	c, err := s.m.Get(r.PathValue("id"))

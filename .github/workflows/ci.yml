@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: lazytest
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -uroot -proot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      LAZYDB_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/lazytest?timeout=5s
+      LAZYDB_SSH_HOST: 127.0.0.1
+      LAZYDB_SSH_PORT: "2222"
+      LAZYDB_SSH_USER: runner
+      LAZYDB_SSH_KEY: /home/runner/.ssh/id_ed25519
+      LAZYDB_SSH_TARGET_HOST: 127.0.0.1
+      LAZYDB_SSH_TARGET_PORT: "3306"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - name: Install and start sshd (tunnel test target)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq openssh-server
+          ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519
+          cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -p 2222
+      - name: Vet
+        run: go vet ./...
+      - name: Test (unit + MySQL/SSH integration, SQLite test source)
+        run: go test -count=1 -timeout 300s ./...
+      - name: Build CGO_ENABLED=0
+        run: CGO_ENABLED=0 go build ./...

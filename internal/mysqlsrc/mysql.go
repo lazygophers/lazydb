@@ -1,0 +1,249 @@
+// Package mysqlsrc 是内置 MySQL 数据源（v1-3 tracer bullet，#18）。
+// 实现 Source 全部核心接口与三个能力接口，走 information_schema 元数据。
+package mysqlsrc
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"net"
+	"os"
+	"strings"
+	"sync/atomic"
+
+	"github.com/go-sql-driver/mysql"
+	"github.com/lazygophers/lazydb/internal/source"
+	"golang.org/x/crypto/ssh"
+)
+
+// MySQL 数据源。SSH 隧道时持有 ssh client，Close 一并关掉。
+type MySQL struct {
+	db        *sql.DB
+	tunnel    *ssh.Client
+	dialProto string // 注册进 mysql driver 的伪协议名，Close 时注销
+}
+
+var _ source.ColumnLister = (*MySQL)(nil)
+var _ source.IndexLister = (*MySQL)(nil)
+var _ source.DDLShower = (*MySQL)(nil)
+
+var dialSeq atomic.Int64
+
+func (m *MySQL) Open(_ context.Context, cfg source.Config) error {
+	if cfg.Driver != "mysql" {
+		return fmt.Errorf("mysqlsrc: driver %q != mysql", cfg.Driver)
+	}
+	dsn, err := mysql.ParseDSN(cfg.DSN)
+	if err != nil {
+		return fmt.Errorf("parse dsn: %w", err)
+	}
+	if sc := cfg.SSH; sc != nil {
+		client, err := dialSSH(sc)
+		if err != nil {
+			return fmt.Errorf("ssh dial %s:%d: %w", sc.Host, sc.Port, err)
+		}
+		m.tunnel = client
+		m.dialProto = fmt.Sprintf("lazydb-ssh-%d", dialSeq.Add(1))
+		mysql.RegisterDialContext(m.dialProto, func(ctx context.Context, addr string) (net.Conn, error) {
+			return client.DialContext(ctx, "tcp", addr)
+		})
+		dsn.Net = m.dialProto
+		dsn.Addr = net.JoinHostPort(sc.TargetHost, fmt.Sprint(sc.TargetPort))
+	}
+	db, err := sql.Open("mysql", dsn.FormatDSN())
+	if err != nil {
+		m.Close()
+		return err
+	}
+	m.db = db
+	return nil
+}
+
+func (m *MySQL) Close() error {
+	var firstErr error
+	if m.db != nil {
+		firstErr = m.db.Close()
+	}
+	if m.dialProto != "" {
+		mysql.DeregisterDialContext(m.dialProto)
+	}
+	if m.tunnel != nil {
+		if err := m.tunnel.Close(); firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (m *MySQL) Ping(ctx context.Context) error {
+	var one int
+	return m.db.QueryRowContext(ctx, "SELECT 1").Scan(&one)
+}
+
+// Children：空 path → 库列表；[db] → 表/视图。
+func (m *MySQL) Children(ctx context.Context, path source.Path) ([]source.Node, error) {
+	switch len(path) {
+	case 0:
+		rows, err := m.db.QueryContext(ctx, "SHOW DATABASES")
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var out []source.Node
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				return nil, err
+			}
+			out = append(out, source.Node{Name: name, Kind: "database"})
+		}
+		return out, rows.Err()
+	case 1:
+		rows, err := m.db.QueryContext(ctx,
+			`SELECT table_name, table_type FROM information_schema.tables
+			 WHERE table_schema = ? ORDER BY table_name`, path[0])
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var out []source.Node
+		for rows.Next() {
+			var name, typ string
+			if err := rows.Scan(&name, &typ); err != nil {
+				return nil, err
+			}
+			kind := "table"
+			if typ == "VIEW" {
+				kind = "view"
+			}
+			out = append(out, source.Node{Name: name, Kind: kind})
+		}
+		return out, rows.Err()
+	default:
+		return nil, nil // 字段走 Columns 能力接口
+	}
+}
+
+func (m *MySQL) Exec(ctx context.Context, stmt string, opts source.ExecOptions) (source.Result, error) {
+	rows, err := m.db.QueryContext(ctx, stmt)
+	if err != nil {
+		return source.Result{}, err
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return source.Result{}, err
+	}
+	if len(cols) == 0 {
+		return source.Result{}, nil
+	}
+	res := source.Result{Columns: cols}
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return source.Result{}, err
+		}
+		for i, v := range vals {
+			if b, ok := v.([]byte); ok { // go-sql-driver 的字符串都是 []byte，JSON 会变 base64
+				vals[i] = string(b)
+			}
+		}
+		res.Rows = append(res.Rows, vals)
+		if opts.MaxRows > 0 && len(res.Rows) == opts.MaxRows {
+			res.Truncated = true
+			break
+		}
+	}
+	return res, rows.Err()
+}
+
+func (m *MySQL) Columns(ctx context.Context, table source.Path) ([]source.Column, error) {
+	db, tbl := table[0], table[len(table)-1]
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT column_name, data_type, is_nullable FROM information_schema.columns
+		 WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position`, db, tbl)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []source.Column
+	for rows.Next() {
+		var c source.Column
+		var nullable string
+		if err := rows.Scan(&c.Name, &c.Type, &nullable); err != nil {
+			return nil, err
+		}
+		c.Nullable = nullable == "YES"
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// Indexes 用 information_schema.statistics，一次收齐再按索引名分组
+// （单连接下避免嵌套查询死锁，同 sqlsrc 的教训）。
+func (m *MySQL) Indexes(ctx context.Context, table source.Path) ([]source.Index, error) {
+	db, tbl := table[0], table[len(table)-1]
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT index_name, column_name, non_unique FROM information_schema.statistics
+		 WHERE table_schema = ? AND table_name = ? ORDER BY index_name, seq_in_index`, db, tbl)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []source.Index
+	for rows.Next() {
+		var name, col string
+		var nonUnique int
+		if err := rows.Scan(&name, &col, &nonUnique); err != nil {
+			return nil, err
+		}
+		if len(out) == 0 || out[len(out)-1].Name != name {
+			out = append(out, source.Index{Name: name, Unique: nonUnique == 0})
+		}
+		ix := &out[len(out)-1]
+		ix.Columns = append(ix.Columns, col)
+	}
+	return out, rows.Err()
+}
+
+// DDL：优先 SHOW CREATE TABLE，视图回退 SHOW CREATE VIEW。
+func (m *MySQL) DDL(ctx context.Context, obj source.Path) (string, error) {
+	db, name := obj[0], obj[len(obj)-1]
+	var tbl, ddl string
+	q := fmt.Sprintf("SHOW CREATE TABLE %s.%s", quoteIdent(db), quoteIdent(name))
+	err := m.db.QueryRowContext(ctx, q).Scan(&tbl, &ddl)
+	if err != nil {
+		var v1, v2, v3, v4, v5 string // SHOW CREATE VIEW 列多，多余列丢弃
+		q2 := fmt.Sprintf("SHOW CREATE VIEW %s.%s", quoteIdent(db), quoteIdent(name))
+		if err2 := m.db.QueryRowContext(ctx, q2).Scan(&v1, &v2, &v3, &v4, &v5); err2 != nil {
+			return "", fmt.Errorf("no DDL for %s.%s: %w", db, name, err)
+		}
+		return v2, nil
+	}
+	return ddl, nil
+}
+
+func dialSSH(sc *source.SSHConfig) (*ssh.Client, error) {
+	key, err := os.ReadFile(sc.KeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("read key: %w", err)
+	}
+	signer, err := ssh.ParsePrivateKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("parse key: %w", err)
+	}
+	cfg := &ssh.ClientConfig{
+		User:            sc.User,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // v1 跳板机信任交给使用者；known_hosts 校验后续加
+	}
+	return ssh.Dial("tcp", net.JoinHostPort(sc.Host, fmt.Sprint(sc.Port)), cfg)
+}
+
+func quoteIdent(name string) string {
+	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
+}

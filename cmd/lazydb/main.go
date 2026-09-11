@@ -10,22 +10,12 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/lazygophers/lazydb/drivers/builtin"
 	"github.com/lazygophers/lazydb/internal/api"
 	"github.com/lazygophers/lazydb/internal/cache"
 	"github.com/lazygophers/lazydb/internal/conn"
 	"github.com/lazygophers/lazydb/internal/runtimefile"
-	"github.com/lazygophers/lazydb/internal/source"
-	"github.com/lazygophers/lazydb/internal/sqlsrc"
 )
-
-// openSource 按驱动名构造 Source。驱动增多（#18 MySQL）时在此登记。
-func openSource(cfg source.Config) (source.Source, error) {
-	switch cfg.Driver {
-	case "sqlite":
-		return &sqlsrc.SQLite{}, nil
-	}
-	return nil, fmt.Errorf("unknown driver %q", cfg.Driver)
-}
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "mcp-server" {
@@ -72,7 +62,7 @@ func run() error {
 	}
 	defer store.Close()
 
-	h := api.New(conn.NewManager(openSource), store, token)
+	h := api.New(conn.NewManager(builtin.Open), store, token)
 	log.Printf("lazydb sidecar listening on %s", ln.Addr())
 	srv := &http.Server{Handler: h}
 	return srv.Serve(ln)

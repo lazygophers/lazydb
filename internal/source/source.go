@@ -8,6 +8,18 @@ import "context"
 type Config struct {
 	Driver string `json:"driver"`
 	DSN    string `json:"dsn"`
+	// SSH 非 nil 时经 SSH 隧道连 DSN 里的目标（v1-3，#18）。
+	SSH *SSHConfig `json:"ssh,omitempty"`
+}
+
+// SSHConfig：经跳板机连数据源。密钥文件路径而非密钥内容（凭据不落输出）。
+type SSHConfig struct {
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	User       string `json:"user"`
+	KeyPath    string `json:"key_path"`
+	TargetHost string `json:"target_host"`
+	TargetPort int    `json:"target_port"`
 }
 
 // Path 是结构树上的位置：实例 → 库 → 表 …，逐级下钻。
