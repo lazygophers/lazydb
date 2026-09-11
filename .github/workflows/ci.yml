@@ -90,8 +90,9 @@ jobs:
             DSN="root@tcp(127.0.0.1:3306)/lazytest?timeout=5s"
           else
             # runner 的 docker 是 Windows 容器模式，拉不了 linux mysql 镜像；choco zip 版
-            # 自动 --initialize-insecure 并装成 Windows 服务（root 无密码）
-            choco install -y --no-progress mysql
+            # 自动 --initialize-insecure 并装成 Windows 服务（root 无密码）。
+            # 钉 8.0：9.x 里 DSN 的 allowNativePassword 参数会报 Unknown system variable
+            choco install -y --no-progress mysql --version=8.0.46
             export PATH="/c/tools/mysql/current/bin:$PATH"
             for i in $(seq 1 30); do mysqladmin -uroot ping --silent && break; sleep 2; done
             mysql -uroot -e "CREATE DATABASE IF NOT EXISTS lazytest;"
