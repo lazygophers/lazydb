@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -14,14 +15,27 @@ import (
 	"github.com/lazygophers/lazydb/internal/api"
 	"github.com/lazygophers/lazydb/internal/cache"
 	"github.com/lazygophers/lazydb/internal/conn"
+	"github.com/lazygophers/lazydb/internal/mcpserver"
 	"github.com/lazygophers/lazydb/internal/runtimefile"
 )
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "mcp-server" {
-		// v1-4（#19）实现；先占住子命令，避免当普通参数吞掉
-		fmt.Fprintln(os.Stderr, "mcp-server 模式尚未实现（#19）")
-		os.Exit(2)
+		fs := flag.NewFlagSet("mcp-server", flag.ExitOnError)
+		home := fs.String("home", "", "用户主目录（默认 $HOME）")
+		allowWrite := fs.Bool("allow-write", false, "放行写语句（默认只读）")
+		_ = fs.Parse(os.Args[2:])
+		h := *home
+		if h == "" {
+			var err error
+			if h, err = os.UserHomeDir(); err != nil {
+				log.Fatal(err)
+			}
+		}
+		if err := mcpserver.Run(context.Background(), h, *allowWrite); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 	if err := run(); err != nil {
 		log.Fatal(err)
