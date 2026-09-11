@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/lazygophers/lazydb/drivers/builtin"
+	"github.com/lazygophers/lazydb/internal/audit"
 	"github.com/lazygophers/lazydb/internal/cache"
 	"github.com/lazygophers/lazydb/internal/conn"
+	"github.com/lazygophers/lazydb/internal/history"
 	"github.com/lazygophers/lazydb/internal/source"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -24,9 +26,19 @@ func Run(ctx context.Context, home string, allowWrite bool) error {
 		return fmt.Errorf("open cache.db: %w", err)
 	}
 	defer store.Close()
+	hist, err := history.Open(home)
+	if err != nil {
+		return fmt.Errorf("open history.db: %w", err)
+	}
+	defer hist.Close()
+	aud, err := audit.Open(home)
+	if err != nil {
+		return fmt.Errorf("open audit.log: %w", err)
+	}
+	defer aud.Close()
 
 	srv := mcp.NewServer(&mcp.Implementation{Name: "lazydb", Version: "v1"}, nil)
-	h := &hub{m: conn.NewManager(builtin.Open), store: store, allowWrite: allowWrite}
+	h := &hub{m: conn.NewManager(builtin.Open), store: store, allowWrite: allowWrite, hist: hist, aud: aud}
 
 	h.toolConnect(srv)
 	h.toolListConnections(srv)
@@ -45,6 +57,8 @@ type hub struct {
 	m          *conn.Manager
 	store      *cache.Store
 	allowWrite bool
+	hist       *history.Store
+	aud        *audit.Logger
 }
 
 func (h *hub) toolConnect(s *mcp.Server) {
@@ -255,7 +269,17 @@ func (h *hub) toolRunQuery(s *mcp.Server) {
 		if a.MaxRows <= 0 {
 			a.MaxRows = 100
 		}
+		start := time.Now()
 		res, err := c.Src.Exec(ctx, a.SQL, source.ExecOptions{MaxRows: a.MaxRows})
+		e := history.Entry{
+			TS: time.Now().UnixMilli(), Conn: c.ID, SQL: a.SQL,
+			MS: time.Since(start).Milliseconds(), OK: err == nil,
+		}
+		if err != nil {
+			e.Err = err.Error()
+		}
+		_ = h.hist.Save(ctx, e)
+		_ = h.aud.Log("mcp", e) // 审计覆盖 MCP 路径（#23）
 		if err != nil {
 			return nil, nil, err
 		}

@@ -128,6 +128,18 @@ class Backend {
   Future<dynamic> testConnection(Map<String, dynamic> cfg) =>
       _json('POST', '/api/test-connection', body: {'config': cfg});
 
+  Future<List<dynamic>> search(String id, String q) async {
+    final r = await _json('GET',
+        '/api/connections/$id/search?q=${Uri.encodeQueryComponent(q)}');
+    return r['matches'] as List<dynamic>;
+  }
+
+  Future<List<dynamic>> history(String q) async {
+    final r = await _json(
+        'GET', '/api/history?q=${Uri.encodeQueryComponent(q)}');
+    return r['items'] as List<dynamic>;
+  }
+
   static String _q(List<String> path) =>
       path.map((p) => 'path=${Uri.encodeQueryComponent(p)}').join('&');
 }

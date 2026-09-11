@@ -63,9 +63,14 @@ class _HomePageState extends State<HomePage> {
   final words = SqlWords();
   final tableDb = <String, String>{}; // 表名 → 库名（补全取字段用）
 
+  // 结构搜索（#23）：非空时结构树换成搜索结果。
+  final searchCtl = TextEditingController();
+  List<dynamic>? searchHits;
+
   @override
   void dispose() {
     sql.dispose();
+    searchCtl.dispose();
     super.dispose();
   }
 
@@ -302,6 +307,98 @@ class _HomePageState extends State<HomePage> {
     } catch (_) {/* 同上 */}
   }
 
+  // ---- 结构搜索（#23，全走后端内存索引） ----
+
+  Future<void> _search(String q) async {
+    if (selectedConn == null || q.isEmpty) {
+      setState(() => searchHits = null);
+      return;
+    }
+    try {
+      final hits = await be!.search(selectedConn!, q);
+      if (searchCtl.text == q) setState(() => searchHits = hits);
+    } catch (_) {
+      setState(() => searchHits = const []);
+    }
+  }
+
+  // ---- 查询历史（#23） ----
+
+  Future<void> _historyDialog() async {
+    final q = TextEditingController();
+    await showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialog) {
+          Future<List<dynamic>> items() => be!.history(q.text);
+          return AlertDialog(
+            title: const Text('查询历史'),
+            content: SizedBox(
+              width: 640,
+              height: 420,
+              child: Column(children: [
+                TextField(
+                  controller: q,
+                  decoration: const InputDecoration(
+                      hintText: '按语句/连接/报错关键字搜',
+                      isDense: true,
+                      prefixIcon: Icon(Icons.search, size: 18)),
+                  onChanged: (_) => setDialog(() {}),
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: FutureBuilder<List<dynamic>>(
+                    future: items(),
+                    builder: (context, snap) {
+                      if (!snap.hasData) {
+                        return const Center(
+                            child: SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2)));
+                      }
+                      if (snap.data!.isEmpty) {
+                        return const Center(
+                            child: Text('无记录', style: TextStyle(color: Colors.grey)));
+                      }
+                      return ListView.builder(
+                        itemCount: snap.data!.length,
+                        itemBuilder: (context, i) {
+                          final e = snap.data![i] as Map<String, dynamic>;
+                          final dt = DateTime.fromMillisecondsSinceEpoch(e['ts']);
+                          return ListTile(
+                            dense: true,
+                            title: Text('${e['sql']}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+                            subtitle: Text(
+                                '${dt.toLocal()}  连接 ${e['conn']}  ${e['ms']}ms  ${e['ok'] == true ? '成功' : '失败：${e['error'] ?? ''}'}',
+                                style: const TextStyle(fontSize: 10)),
+                            onTap: () {
+                              sql.text = e['sql'] as String; // 点历史语句取回编辑器
+                              Navigator.pop(context);
+                            },
+                          );
+                        },
+                      );
+                    },
+                  ),
+                ),
+              ]),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('关闭')),
+            ],
+          );
+        },
+      ),
+    );
+    q.dispose();
+  }
+
   // ---- 布局 ----
 
   @override
@@ -390,7 +487,16 @@ class _HomePageState extends State<HomePage> {
     }
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       Padding(
-        padding: const EdgeInsets.all(8),
+        padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
+        child: TextField(
+          controller: searchCtl,
+          decoration: const InputDecoration(
+              hintText: '搜索表/字段', isDense: true, prefixIcon: Icon(Icons.search, size: 18)),
+          onChanged: _search,
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
         child: Row(children: [
           const Text('结构'),
           const Spacer(),
@@ -405,9 +511,45 @@ class _HomePageState extends State<HomePage> {
         ]),
       ),
       Expanded(
-        child: ListView(children: [for (final n in roots) _treeNode(selectedConn!, n, 0)]),
+        child: searchCtl.text.isNotEmpty
+            ? _searchList()
+            : ListView(
+                children: [for (final n in roots) _treeNode(selectedConn!, n, 0)]),
       ),
     ]);
+  }
+
+  // 搜索结果：kind 图标 + db.table（字段名后缀列名）。
+  Widget _searchList() {
+    final hits = searchHits;
+    if (hits == null) {
+      return const Center(child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)));
+    }
+    if (hits.isEmpty) {
+      return const Center(child: Text('无匹配', style: TextStyle(color: Colors.grey)));
+    }
+    return ListView.builder(
+      itemCount: hits.length,
+      itemBuilder: (context, i) {
+        final m = hits[i] as Map<String, dynamic>;
+        final col = m['column'] as String?;
+        return ListTile(
+          dense: true,
+          leading: Icon(m['kind'] == 'table' ? Icons.table_chart : Icons.view_column_outlined,
+              size: 16, color: Colors.grey),
+          title: Text(col == null ? '${m['table']}' : '${m['table']}.$col',
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+          subtitle: col == null
+              ? null
+              : Text('${m['type'] ?? ''}', style: const TextStyle(fontSize: 10)),
+          onTap: () {
+            // 点表名把它带进编辑器，省一次手打
+            final name = (m['table'] as String).split('.');
+            sql.text = 'SELECT *\nFROM ${name.length == 2 ? name[1] : m['table']};';
+          },
+        );
+      },
+    );
   }
 
   Widget _treeNode(String connId, TreeNode n, int depth) {
@@ -482,6 +624,11 @@ class _HomePageState extends State<HomePage> {
           Text(selectedConn == null ? '未选连接' : '整段执行；有选中则只执行选中',
               style: const TextStyle(fontSize: 11, color: Colors.grey)),
           const Spacer(),
+          IconButton(
+              tooltip: '查询历史',
+              icon: const Icon(Icons.history, size: 18),
+              onPressed: _historyDialog),
+          const SizedBox(width: 8),
           FilledButton(
             onPressed: selectedConn == null || running ? null : _runSql,
             child: running

@@ -14,9 +14,11 @@ import (
 
 	"github.com/lazygophers/lazydb/drivers/builtin"
 	"github.com/lazygophers/lazydb/internal/api"
+	"github.com/lazygophers/lazydb/internal/audit"
 	"github.com/lazygophers/lazydb/internal/cache"
 	"github.com/lazygophers/lazydb/internal/conn"
 	"github.com/lazygophers/lazydb/internal/driverhost"
+	"github.com/lazygophers/lazydb/internal/history"
 	"github.com/lazygophers/lazydb/internal/mcpserver"
 	"github.com/lazygophers/lazydb/internal/runtimefile"
 	"github.com/lazygophers/lazydb/internal/source"
@@ -79,6 +81,17 @@ func run() error {
 	}
 	defer store.Close()
 
+	hist, err := history.Open(*home)
+	if err != nil {
+		return fmt.Errorf("open history.db: %w", err)
+	}
+	defer hist.Close()
+	aud, err := audit.Open(*home)
+	if err != nil {
+		return fmt.Errorf("open audit.log: %w", err)
+	}
+	defer aud.Close()
+
 	// 驱动插件化（ADR-0002）：设 LAZYDB_DRIVER_INDEX 后，LAZYDB_PLUGIN_DRIVERS
 	// （csv，默认 mysql）里的驱动走 driverhost（索引→下载→独立进程），
 	// 其余仍走内置。不设则全内置，离线不受影响。
@@ -102,7 +115,7 @@ func run() error {
 		}
 	}
 
-	h := api.New(conn.NewManager(open), store, token)
+	h := api.New(conn.NewManager(open), store, token, hist, aud)
 	log.Printf("lazydb sidecar listening on %s", ln.Addr())
 	srv := &http.Server{Handler: h}
 	return srv.Serve(ln)

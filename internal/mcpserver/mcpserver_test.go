@@ -5,6 +5,7 @@ package mcpserver_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -210,8 +211,43 @@ func TestMCPAllowWrite(t *testing.T) {
 	}
 }
 
-// mcp-server 与「后端」并发读写 cache.db 无损坏：MCP 会话跑查询的同时
-// 本进程另开 Store 写，结束后 quick_check = ok，且双方数据都可见。
+// MCP 路径执行留审计痕（#23）：run_query 后 audit.log 出现 source=mcp 的行。
+func TestMCPAuditTrail(t *testing.T) {
+	home := t.TempDir()
+	dsn := setupDB(t, home)
+	cs := newClient(t, home, false)
+	connID := connect(t, cs, dsn)
+
+	call(t, cs, "run_query", map[string]any{
+		"conn": connID, "sql": "SELECT COUNT(*) AS n FROM orders",
+	})
+
+	b, err := os.ReadFile(filepath.Join(home, "audit.log"))
+	if err != nil {
+		t.Fatalf("read audit.log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	found := false
+	for _, line := range lines {
+		var e struct {
+			Source string `json:"source"`
+			SQL    string `json:"sql"`
+			OK     bool   `json:"ok"`
+			Conn   string `json:"conn"`
+		}
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("bad audit line %q: %v", line, err)
+		}
+		if e.Source == "mcp" && strings.Contains(e.SQL, "COUNT") && e.OK && e.Conn == connID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no mcp audit entry in %d lines", len(lines))
+	}
+}
+
+// mcp-server 与「后端」并发读写 cache.db 无损坏：MCP 会话跑查询的同时// 本进程另开 Store 写，结束后 quick_check = ok，且双方数据都可见。
 func TestMCPAndBackendShareCache(t *testing.T) {
 	home := t.TempDir()
 	dsn := setupDB(t, home)

@@ -75,7 +75,7 @@ func newSuiteServer(t *testing.T, cfg source.Config) (ts *httptest.Server, id st
 	}
 	t.Cleanup(func() { store.Close() })
 	m := conn.NewManager(builtin.Open)
-	ts = httptest.NewServer(api.New(m, store, token))
+	ts = httptest.NewServer(api.New(m, store, token, nil, nil))
 	t.Cleanup(ts.Close)
 	body, _ := json.Marshal(map[string]any{"name": "s", "config": cfg})
 	res := do(t, ts, "POST", "/api/connections", body, http.StatusCreated)
@@ -189,7 +189,7 @@ func TestTestConnectionEndpoint(t *testing.T) {
 	}
 	t.Cleanup(func() { store.Close() })
 	m := conn.NewManager(builtin.Open)
-	ts := httptest.NewServer(api.New(m, store, token))
+	ts := httptest.NewServer(api.New(m, store, token, nil, nil))
 	t.Cleanup(ts.Close)
 
 	// 对的凭据

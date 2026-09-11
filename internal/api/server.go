@@ -7,16 +7,20 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/lazygophers/lazydb/internal/audit"
 	"github.com/lazygophers/lazydb/internal/cache"
 	"github.com/lazygophers/lazydb/internal/conn"
+	"github.com/lazygophers/lazydb/internal/history"
 	"github.com/lazygophers/lazydb/internal/source"
 )
 
-// New 组装路由。cs 为 nil 时关缓存；token 非空时启用 Bearer 鉴权。
-func New(m *conn.Manager, cs *cache.Store, token string) http.Handler {
-	s := &server{m: m, store: cs, token: token, ttl: cache.DefaultTTL}
+// New 组装路由。cs 为 nil 时关缓存；token 非空时启用 Bearer 鉴权；
+// hist/aud 为 nil 时关历史/审计（测试可注入）。
+func New(m *conn.Manager, cs *cache.Store, token string, hist *history.Store, aud *audit.Logger) http.Handler {
+	s := &server{m: m, store: cs, token: token, ttl: cache.DefaultTTL, hist: hist, aud: aud}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /api/connections", s.createConn)
@@ -28,12 +32,16 @@ func New(m *conn.Manager, cs *cache.Store, token string) http.Handler {
 	mux.HandleFunc("GET /api/connections/{id}/columns", s.columns)
 	mux.HandleFunc("GET /api/connections/{id}/indexes", s.indexes)
 	mux.HandleFunc("GET /api/connections/{id}/ddl", s.ddl)
+	mux.HandleFunc("GET /api/connections/{id}/search", s.search)
 	mux.HandleFunc("GET /api/connections/{id}/capabilities", s.capabilities)
 	mux.HandleFunc("POST /api/connections/{id}/refresh", s.refresh)
 	mux.HandleFunc("POST /api/test-connection", s.testConnection)
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	if hist != nil {
+		mux.HandleFunc("GET /api/history", s.listHistory)
+	}
 
 	return s.auth(mux)
 }
@@ -43,6 +51,11 @@ type server struct {
 	store *cache.Store
 	token string
 	ttl   time.Duration
+	hist  *history.Store
+	aud   *audit.Logger
+
+	idxMu sync.Mutex
+	idx   map[string]*searchIndex // connID → 内存索引（refresh 时作废）
 }
 
 // ---- 鉴权 ----
@@ -109,6 +122,9 @@ func (s *server) removeConn(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found", err.Error())
 		return
 	}
+	s.idxMu.Lock()
+	delete(s.idx, r.PathValue("id"))
+	s.idxMu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -160,13 +176,132 @@ func (s *server) exec(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "sql is required")
 		return
 	}
-	res, err := c.Src.Exec(r.Context(), req.SQL, req.ExecOptions)
+	res, err := func() (source.Result, error) {
+		start := time.Now()
+		res, err := c.Src.Exec(r.Context(), req.SQL, req.ExecOptions)
+		s.recordExec("ui", c.ID, req.SQL, time.Since(start), err)
+		return res, err
+	}()
 	if err != nil {
 		// SQL 语法/约束错误：客户端的输入问题，回 400 而不是 500
 		writeErr(w, http.StatusBadRequest, "sql_error", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// recordExec 历史与审计共用一条记录（#23）。写失败不拦回包。
+func (s *server) recordExec(source, connID, sql string, d time.Duration, err error) {
+	if s.hist == nil && s.aud == nil {
+		return
+	}
+	e := history.Entry{
+		TS: time.Now().UnixMilli(), Conn: connID, SQL: sql,
+		MS: d.Milliseconds(), OK: err == nil,
+	}
+	if err != nil {
+		e.Err = err.Error()
+	}
+	_ = s.hist.Save(context.Background(), e)
+	_ = s.aud.Log(source, e)
+}
+
+// ---- 搜索（#23：内存索引，断网走缓存 stale-fallback） ----
+
+type searchIndex struct {
+	tables  []string // db.table 全名
+	columns map[string][]source.Column
+}
+
+// searchIndexFor 首次搜索时建内存索引（经缓存，拉不动的库靠 stale-fallback），
+// 之后纯内存匹配。refresh 作废重建。
+func (s *server) searchIndexFor(ctx context.Context, c *conn.Conn) (*searchIndex, error) {
+	s.idxMu.Lock()
+	defer s.idxMu.Unlock()
+	if s.idx == nil {
+		s.idx = map[string]*searchIndex{}
+	}
+	if ix, ok := s.idx[c.ID]; ok {
+		return ix, nil
+	}
+	ix := &searchIndex{columns: map[string][]source.Column{}}
+	cl, hasCols := c.Src.(source.ColumnLister)
+
+	dbs, _, err := cached(s, ctx, c, nil, cache.KindChildren,
+		func(ctx context.Context) ([]source.Node, error) { return c.Src.Children(ctx, nil) })
+	if err != nil {
+		return nil, err
+	}
+	for _, db := range dbs {
+		tables, _, err := cached(s, ctx, c, source.Path{db.Name}, cache.KindChildren,
+			func(ctx context.Context) ([]source.Node, error) {
+				return c.Src.Children(ctx, source.Path{db.Name})
+			})
+		if err != nil {
+			continue // 单库失败不拖垮整搜
+		}
+		for _, t := range tables {
+			full := db.Name + "." + t.Name
+			ix.tables = append(ix.tables, full)
+			if hasCols {
+				if cols, _, err := cached(s, ctx, c, source.Path{db.Name, t.Name}, cache.KindColumns,
+					func(ctx context.Context) ([]source.Column, error) {
+						return cl.Columns(ctx, source.Path{db.Name, t.Name})
+					}); err == nil {
+					ix.columns[full] = cols
+				}
+			}
+		}
+	}
+	s.idx[c.ID] = ix
+	return ix, nil
+}
+
+func (s *server) search(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.getConn(w, r)
+	if !ok {
+		return // getConn 已写响应
+	}
+	q := strings.ToLower(r.URL.Query().Get("q"))
+	ix, err := s.searchIndexFor(r.Context(), c)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "search_failed", err.Error())
+		return
+	}
+	type match struct {
+		Kind     string `json:"kind"` // table | column
+		Table    string `json:"table"`
+		Column   string `json:"column,omitempty"`
+		Type     string `json:"type,omitempty"`
+	}
+	matches := []match{}
+	for _, t := range ix.tables {
+		if strings.Contains(strings.ToLower(t), q) {
+			matches = append(matches, match{Kind: "table", Table: t})
+		}
+		for _, col := range ix.columns[t] {
+			if q != "" && strings.Contains(strings.ToLower(col.Name), q) {
+				matches = append(matches, match{Kind: "column", Table: t, Column: col.Name, Type: col.Type})
+			}
+		}
+	}
+	// ponytail: 无上限返回；结果集大到拖慢回包时再加分页。
+	writeJSON(w, http.StatusOK, map[string]any{"matches": matches})
+}
+
+// ---- 查询历史 ----
+
+func (s *server) listHistory(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	items, err := s.hist.List(r.Context(), q, 200)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "history_error", err.Error())
+		return
+	}
+	if items == nil {
+		items = []history.Entry{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 // ---- 能力接口（类型断言探测，ADR-0003）----
@@ -262,6 +397,9 @@ func (s *server) refresh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	s.idxMu.Lock() // 结构变了，搜索索引作废
+	delete(s.idx, c.ID)
+	s.idxMu.Unlock()
 	p := source.Path(req.Path)
 	refreshed := map[string]bool{}
 	if nodes, err := c.Src.Children(r.Context(), p); err == nil && s.store != nil {

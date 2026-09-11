@@ -41,7 +41,7 @@ func newServerAt(t *testing.T, dir string) (*httptest.Server, *conn.Manager, *ca
 	m := conn.NewManager(func(cfg source.Config) (source.Source, error) {
 		return &sqlsrc.SQLite{}, nil
 	})
-	ts := httptest.NewServer(api.New(m, store, token))
+	ts := httptest.NewServer(api.New(m, store, token, nil, nil))
 	t.Cleanup(ts.Close)
 	return ts, m, store, dsn
 }
@@ -295,7 +295,7 @@ func TestOfflineBrowseFromCache(t *testing.T) {
 	m2 := conn.NewManager(func(cfg source.Config) (source.Source, error) {
 		return brokenSource{}, nil
 	})
-	ts2 := httptest.NewServer(api.New(m2, dir2store, token))
+	ts2 := httptest.NewServer(api.New(m2, dir2store, token, nil, nil))
 	t.Cleanup(ts2.Close)
 
 	body, _ := json.Marshal(map[string]any{"name": "t", "config": map[string]string{"driver": "sqlite", "dsn": dsn}})
