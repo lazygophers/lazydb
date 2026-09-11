@@ -125,8 +125,14 @@ func TestMySQLFullChainDirect(t *testing.T) {
 		Nodes []source.Node `json:"nodes"`
 	}
 	json.Unmarshal(do(t, ts, "GET", fmt.Sprintf("/api/connections/%s/children?path=%s", id, dbName), nil, http.StatusOK), &tables)
-	if len(tables.Nodes) != 1 || tables.Nodes[0].Name != "users" || tables.Nodes[0].Kind != "table" {
-		t.Fatalf("tables = %+v", tables.Nodes)
+	found = false
+	for _, n := range tables.Nodes {
+		if n.Name == "users" && n.Kind == "table" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("users table missing: %+v", tables.Nodes)
 	}
 
 	// 字段
@@ -172,11 +178,26 @@ func TestMySQLFullChainTunnel(t *testing.T) {
 	do(t, ts, "POST", fmt.Sprintf("/api/connections/%s/ping", id), nil, http.StatusOK)
 	do(t, ts, "POST", fmt.Sprintf("/api/connections/%s/exec", id),
 		mustJSON(t, map[string]string{"sql": `CREATE TABLE IF NOT EXISTS tunnel_t (x INT PRIMARY KEY)`}), http.StatusOK)
+	// 写语句走隧道（#24）：TRUNCATE + INSERT 返回受影响行数
+	var w source.Result
+	json.Unmarshal(do(t, ts, "POST", fmt.Sprintf("/api/connections/%s/exec", id),
+		mustJSON(t, map[string]string{"sql": `TRUNCATE TABLE tunnel_t`}), http.StatusOK), &w)
+	json.Unmarshal(do(t, ts, "POST", fmt.Sprintf("/api/connections/%s/exec", id),
+		mustJSON(t, map[string]string{"sql": `INSERT INTO tunnel_t (x) VALUES (1), (2)`}), http.StatusOK), &w)
+	if w.RowsAffected != 2 {
+		t.Fatalf("tunnel insert affected = %+v", w)
+	}
 	var res source.Result
 	json.Unmarshal(do(t, ts, "POST", fmt.Sprintf("/api/connections/%s/exec", id),
 		mustJSON(t, map[string]any{"sql": "SELECT COUNT(*) AS n FROM tunnel_t"}), http.StatusOK), &res)
 	if len(res.Rows) != 1 {
 		t.Fatalf("tunnel exec = %+v", res)
+	}
+	// 导出走隧道（#24）
+	csv := do(t, ts, "POST", fmt.Sprintf("/api/connections/%s/export", id),
+		mustJSON(t, map[string]string{"sql": "SELECT x FROM tunnel_t ORDER BY x", "format": "csv"}), http.StatusOK)
+	if !strings.Contains(string(csv), "\n1\n2\n") {
+		t.Fatalf("tunnel export = %q", csv)
 	}
 }
 

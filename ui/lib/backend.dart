@@ -140,6 +140,27 @@ class Backend {
     return r['items'] as List<dynamic>;
   }
 
+  /// 导出结果集到本地文件（#24）：响应流式落盘，不整包进内存。
+  Future<void> exportToFile(String id, String sql, String format, String path) async {
+    final req = await _http.openUrl(
+        'POST', Uri.parse('$base/api/connections/$id/export'));
+    req.headers.set('Authorization', 'Bearer $token');
+    final b = utf8.encode(jsonEncode({'sql': sql, 'format': format}));
+    req.headers.contentLength = b.length;
+    req.headers.contentType = ContentType.json;
+    req.add(b);
+    final res = await req.close();
+    if (res.statusCode >= 400) {
+      final text = await res.transform(utf8.decoder).join();
+      final e = (text.isEmpty ? null : jsonDecode(text)) as Map?;
+      throw ApiError(res.statusCode, e?['error']?['code'] ?? 'error',
+          e?['error']?['message'] ?? res.reasonPhrase ?? '');
+    }
+    final sink = File(path).openWrite();
+    await sink.addStream(res);
+    await sink.close();
+  }
+
   static String _q(List<String> path) =>
       path.map((p) => 'path=${Uri.encodeQueryComponent(p)}').join('&');
 }

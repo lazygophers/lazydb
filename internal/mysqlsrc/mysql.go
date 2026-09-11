@@ -26,6 +26,7 @@ type MySQL struct {
 var _ source.ColumnLister = (*MySQL)(nil)
 var _ source.IndexLister = (*MySQL)(nil)
 var _ source.DDLShower = (*MySQL)(nil)
+var _ source.RowStreamer = (*MySQL)(nil)
 
 var dialSeq atomic.Int64
 
@@ -125,6 +126,16 @@ func (m *MySQL) Children(ctx context.Context, path source.Path) ([]source.Node, 
 }
 
 func (m *MySQL) Exec(ctx context.Context, stmt string, opts source.ExecOptions) (source.Result, error) {
+	if !source.ReadVerb(stmt) {
+		// 写语句走 Exec 拿受影响行数（#24）。
+		// ponytail: 首词判断，写语句带返回集时拿不到，需要时再加。
+		r, err := m.db.ExecContext(ctx, stmt)
+		if err != nil {
+			return source.Result{}, err
+		}
+		n, _ := r.RowsAffected()
+		return source.Result{RowsAffected: n}, nil
+	}
 	rows, err := m.db.QueryContext(ctx, stmt)
 	if err != nil {
 		return source.Result{}, err
@@ -159,6 +170,44 @@ func (m *MySQL) Exec(ctx context.Context, stmt string, opts source.ExecOptions) 
 		}
 	}
 	return res, rows.Err()
+}
+
+// Stream 逐行回调（#24 导出缝）：database/sql 游标式，天然流式。
+func (m *MySQL) Stream(ctx context.Context, stmt string, header func([]string) error, emit func(row []any) error) error {
+	rows, err := m.db.QueryContext(ctx, stmt)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+	if len(cols) == 0 {
+		return fmt.Errorf("mysqlsrc: 非查询语句，无结果可导出")
+	}
+	if err := header(cols); err != nil {
+		return err
+	}
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return err
+		}
+		for i, v := range vals {
+			if b, ok := v.([]byte); ok { // go-sql-driver 的字符串都是 []byte
+				vals[i] = string(b)
+			}
+		}
+		if err := emit(vals); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 func (m *MySQL) Columns(ctx context.Context, table source.Path) ([]source.Column, error) {

@@ -242,12 +242,8 @@ func (h *hub) toolSearchSchema(s *mcp.Server) {
 	})
 }
 
-// 只读动词白名单。ponytail: 首词判断挡不住 CTE 藏写等绕过，真闸门
-// 在 #24 上只读事务；到时换 db.Connector 只读模式。
-var readOnlyVerbs = map[string]bool{
-	"select": true, "show": true, "desc": true, "describe": true,
-	"explain": true, "with": true, "pragma": true, "use": true,
-}
+// 默认只读闸门（source.ReadVerb：首词白名单）。
+// ponytail: 首词判断挡不住 CTE 藏写等绕过，真闸门在 #24 之后的驱动只读模式。
 
 func (h *hub) toolRunQuery(s *mcp.Server) {
 	type args struct {
@@ -287,13 +283,7 @@ func (h *hub) toolRunQuery(s *mcp.Server) {
 	})
 }
 
-func isReadOnly(sql string) bool {
-	s := strings.TrimSpace(sql)
-	if i := strings.IndexAny(s, " \t\r\n;"); i >= 0 {
-		s = s[:i]
-	}
-	return readOnlyVerbs[strings.ToLower(s)]
-}
+func isReadOnly(sql string) bool { return source.ReadVerb(sql) }
 
 // cachedNodes / cachedJSON 与 api.cached 同一套缓存优先逻辑（ADR-0004）。
 func cachedNodes(ctx context.Context, h *hub, c *conn.Conn, path source.Path) ([]source.Node, bool, error) {

@@ -75,6 +75,16 @@ func (s *SQLite) Children(ctx context.Context, path source.Path) ([]source.Node,
 }
 
 func (s *SQLite) Exec(ctx context.Context, stmt string, opts source.ExecOptions) (source.Result, error) {
+	if !source.ReadVerb(stmt) {
+		// 写语句走 Exec 拿受影响行数（#24）。
+		// ponytail: 首词判断，INSERT…RETURNING 拿不到返回集，需要时再加。
+		r, err := s.db.ExecContext(ctx, stmt)
+		if err != nil {
+			return source.Result{}, err
+		}
+		n, _ := r.RowsAffected()
+		return source.Result{RowsAffected: n}, nil
+	}
 	rows, err := s.db.QueryContext(ctx, stmt)
 	if err != nil {
 		return source.Result{}, err
@@ -85,7 +95,6 @@ func (s *SQLite) Exec(ctx context.Context, stmt string, opts source.ExecOptions)
 		return source.Result{}, err
 	}
 	if len(cols) == 0 {
-		// 非 SELECT（建表/写数据），SQLite 经 Query 也能执行，无结果集
 		return source.Result{}, nil
 	}
 	res := source.Result{Columns: cols}
@@ -105,6 +114,41 @@ func (s *SQLite) Exec(ctx context.Context, stmt string, opts source.ExecOptions)
 		}
 	}
 	return res, rows.Err()
+}
+
+var _ source.RowStreamer = (*SQLite)(nil)
+
+// Stream 逐行回调（#24 导出缝）：database/sql 本身游标式，天然流式。
+func (s *SQLite) Stream(ctx context.Context, stmt string, header func([]string) error, emit func(row []any) error) error {
+	rows, err := s.db.QueryContext(ctx, stmt)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+	if len(cols) == 0 {
+		return fmt.Errorf("sqlsrc: 非查询语句，无结果可导出")
+	}
+	if err := header(cols); err != nil {
+		return err
+	}
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return err
+		}
+		if err := emit(vals); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 // Columns 列出一张表的字段。table 形如 ["main", "表名"]，末位是表名。

@@ -31,4 +31,10 @@ void main() {
     expect(r.rows, isEmpty);
     expect(r.truncated, false);
   });
+
+  test('QueryResult.fromJson 写语句受影响行数（#24）', () {
+    final r = QueryResult.fromJson(
+        {'columns': [], 'rows': [], 'rows_affected': 3});
+    expect(r.rowsAffected, 3);
+  });
 }

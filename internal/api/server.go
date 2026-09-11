@@ -3,6 +3,7 @@ package api
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/lazygophers/lazydb/internal/conn"
 	"github.com/lazygophers/lazydb/internal/history"
 	"github.com/lazygophers/lazydb/internal/source"
+	"github.com/xuri/excelize/v2"
 )
 
 // New 组装路由。cs 为 nil 时关缓存；token 非空时启用 Bearer 鉴权；
@@ -29,6 +31,7 @@ func New(m *conn.Manager, cs *cache.Store, token string, hist *history.Store, au
 	mux.HandleFunc("POST /api/connections/{id}/ping", s.ping)
 	mux.HandleFunc("GET /api/connections/{id}/children", s.children)
 	mux.HandleFunc("POST /api/connections/{id}/exec", s.exec)
+	mux.HandleFunc("POST /api/connections/{id}/export", s.export)
 	mux.HandleFunc("GET /api/connections/{id}/columns", s.columns)
 	mux.HandleFunc("GET /api/connections/{id}/indexes", s.indexes)
 	mux.HandleFunc("GET /api/connections/{id}/ddl", s.ddl)
@@ -188,6 +191,132 @@ func (s *server) exec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// ---- 导出（#24：RowStreamer 逐行写回，不整包进内存） ----
+
+// export POST {sql, format:csv|xlsx}。流式回包；也是一次执行，留历史与审计。
+func (s *server) export(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.getConn(w, r)
+	if !ok {
+		return
+	}
+	rs, ok := c.Src.(source.RowStreamer)
+	if !ok {
+		writeErr(w, http.StatusNotImplemented, "unsupported", "该数据源不支持导出")
+		return
+	}
+	var req struct {
+		SQL    string `json:"sql"`
+		Format string `json:"format"`
+	}
+	if err := decode(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if strings.TrimSpace(req.SQL) == "" {
+		writeErr(w, http.StatusBadRequest, "bad_request", "sql is required")
+		return
+	}
+	if req.Format != "csv" && req.Format != "xlsx" {
+		writeErr(w, http.StatusBadRequest, "bad_request", "format 仅支持 csv | xlsx")
+		return
+	}
+
+	w.Header().Set("Content-Type", map[string]string{
+		"csv":  "text/csv; charset=utf-8",
+		"xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	}[req.Format])
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=export.%s", req.Format))
+
+	bw := &countWriter{ResponseWriter: w}
+	start := time.Now()
+	var err error
+	switch req.Format {
+	case "csv":
+		cw := csv.NewWriter(bw)
+		// BOM 在 header 回调里写：SQL 本身失败时一个字节都没出，还能回 400
+		err = rs.Stream(r.Context(), req.SQL,
+			func(cols []string) error {
+				if _, e := bw.Write([]byte{0xEF, 0xBB, 0xBF}); e != nil { // Excel 双击打开才认 UTF-8 中文
+					return e
+				}
+				return cw.Write(cols)
+			},
+			func(row []any) error { return cw.Write(cellsOf(row)) })
+		cw.Flush()
+		if err == nil {
+			err = cw.Error()
+		}
+	default:
+		var f *excelize.File
+		var sw *excelize.StreamWriter
+		f = excelize.NewFile()
+		sw, err = f.NewStreamWriter("Sheet1")
+		if err == nil {
+			n := 0
+			err = rs.Stream(r.Context(), req.SQL,
+				func(cols []string) error {
+					n++
+					return sw.SetRow("A1", headerIface(cols))
+				},
+				func(row []any) error {
+					n++
+					cells := make([]interface{}, len(row))
+					for i, v := range row {
+						cells[i] = v
+					}
+					return sw.SetRow(fmt.Sprintf("A%d", n), cells)
+				})
+			if err == nil {
+				if err = sw.Flush(); err == nil {
+					err = f.Write(bw)
+				}
+			}
+		}
+	}
+	s.recordExec("ui", c.ID, "export "+req.Format+": "+req.SQL, time.Since(start), err)
+	if err != nil && bw.n == 0 {
+		// 一个字节没出才能回错误状态码；已开流只能靠截断的文件让客户端感知
+		writeErr(w, http.StatusBadRequest, "export_failed", err.Error())
+	}
+}
+
+// countWriter 数写到客户端的字节（export 判断还能否回错误状态码）。
+type countWriter struct {
+	http.ResponseWriter
+	n int
+}
+
+func (c *countWriter) Write(b []byte) (int, error) {
+	n, err := c.ResponseWriter.Write(b)
+	c.n += n
+	return n, err
+}
+
+// cellsOf 行转字符串（NULL → 空）。
+func cellsOf(row []any) []string {
+	out := make([]string, len(row))
+	for i, v := range row {
+		switch x := v.(type) {
+		case nil:
+		case string:
+			out[i] = x
+		case []byte:
+			out[i] = string(x)
+		default:
+			out[i] = fmt.Sprint(x)
+		}
+	}
+	return out
+}
+
+func headerIface(cols []string) []interface{} {
+	out := make([]interface{}, len(cols))
+	for i, c := range cols {
+		out[i] = c
+	}
+	return out
 }
 
 // recordExec 历史与审计共用一条记录（#23）。写失败不拦回包。

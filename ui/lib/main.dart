@@ -1,5 +1,6 @@
 // lazydb 桌面界面（#20）：左连接列表、中结构树（懒加载）、右 SQL + 结果。
 // 界面零业务逻辑：所有数据经 Backend 的 HTTP API（ADR-0001）。
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:re_editor/re_editor.dart';
@@ -66,6 +67,7 @@ class _HomePageState extends State<HomePage> {
   // 结构搜索（#23）：非空时结构树换成搜索结果。
   final searchCtl = TextEditingController();
   List<dynamic>? searchHits;
+  bool exporting = false;
 
   @override
   void dispose() {
@@ -278,6 +280,27 @@ class _HomePageState extends State<HomePage> {
       runError = '$e';
     } finally {
       setState(() => running = false);
+    }
+  }
+
+  // 导出当前语句结果（#24）：存盘面板选位置，后端流式下载。
+  Future<void> _export(String format) async {
+    if (selectedConn == null || running) return;
+    final text = sql.selectedText.trim().isNotEmpty ? sql.selectedText : sql.text;
+    if (text.trim().isEmpty) return;
+    final loc = await getSaveLocation(
+        suggestedName: 'export.$format',
+        acceptedTypeGroups: [
+          XTypeGroup(label: format.toUpperCase(), extensions: [format])
+        ]);
+    if (loc == null) return;
+    setState(() => exporting = true);
+    try {
+      await be!.exportToFile(selectedConn!, text, format, loc.path);
+    } catch (e) {
+      setState(() => runError = '导出失败：$e');
+    } finally {
+      setState(() => exporting = false);
     }
   }
 
@@ -628,6 +651,16 @@ class _HomePageState extends State<HomePage> {
               tooltip: '查询历史',
               icon: const Icon(Icons.history, size: 18),
               onPressed: _historyDialog),
+          const SizedBox(width: 8),
+          PopupMenuButton<String>(
+            tooltip: '导出',
+            enabled: selectedConn != null && !exporting && !running,
+            onSelected: _export,
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'csv', child: Text('导出 CSV')),
+              PopupMenuItem(value: 'xlsx', child: Text('导出 Excel')),
+            ],
+          ),
           const SizedBox(width: 8),
           FilledButton(
             onPressed: selectedConn == null || running ? null : _runSql,

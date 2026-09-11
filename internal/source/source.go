@@ -2,7 +2,10 @@
 // 本包不含任何具体驱动。
 package source
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // Config 是打开一个数据源所需的全部信息。DSN 格式由驱动自行解释。
 type Config struct {
@@ -51,11 +54,13 @@ type Index struct {
 	Unique  bool     `json:"unique"`
 }
 
-// Result 是一次 Exec 的返回。Truncated 表示因 MaxRows 截断。
+// Result 是一次 Exec 的返回。Truncated 表示因 MaxRows 截断；
+// RowsAffected 是写语句（INSERT/UPDATE/DELETE/DDL）的受影响行数，读语句为 0。
 type Result struct {
-	Columns   []string `json:"columns"`
-	Rows      [][]any  `json:"rows"`
-	Truncated bool     `json:"truncated"`
+	Columns      []string `json:"columns"`
+	Rows         [][]any  `json:"rows"`
+	Truncated    bool     `json:"truncated"`
+	RowsAffected int64    `json:"rows_affected"`
 }
 
 // Source 是每类数据源必须实现的核心接口（ADR-0003）。
@@ -80,4 +85,27 @@ type IndexLister interface {
 
 type DDLShower interface {
 	DDL(ctx context.Context, obj Path) (string, error)
+}
+
+// RowStreamer 是导出用能力接口（#24）：逐行回调，不整包进内存。
+type RowStreamer interface {
+	// Stream 执行语句：列名经 header 先送达（空结果也送），随后逐行回调 row。
+	// 任一回调返回错误即中断。
+	Stream(ctx context.Context, stmt string, header func(cols []string) error, row func([]any) error) error
+}
+
+// readVerbs 只读动词白名单。ReadVerb 按首词判断（MCP 默认只读闸门也用它）。
+// ponytail: 首词判断挡不住 CTE 藏写等绕过，真闸门在驱动只读模式上。
+var readVerbs = map[string]bool{
+	"select": true, "show": true, "desc": true, "describe": true,
+	"explain": true, "with": true, "pragma": true, "use": true,
+}
+
+// ReadVerb 报告语句首词是否只读动词。
+func ReadVerb(sql string) bool {
+	s := strings.TrimSpace(sql)
+	if i := strings.IndexAny(s, " \t\r\n;("); i >= 0 {
+		s = s[:i]
+	}
+	return readVerbs[strings.ToLower(s)]
 }

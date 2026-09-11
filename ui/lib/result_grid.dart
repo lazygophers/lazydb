@@ -9,12 +9,14 @@ class QueryResult {
   final List<String> columns;
   final List<List<dynamic>> rows;
   final bool truncated;
-  QueryResult(this.columns, this.rows, {this.truncated = false});
+  final int rowsAffected; // 写语句的受影响行数（#24）
+  QueryResult(this.columns, this.rows, {this.truncated = false, this.rowsAffected = 0});
 
   factory QueryResult.fromJson(Map<String, dynamic> j) => QueryResult(
       (j['columns'] as List).cast<String>(),
       (j['rows'] as List).map((r) => (r as List).toList()).toList(),
-      truncated: j['truncated'] == true);
+      truncated: j['truncated'] == true,
+      rowsAffected: (j['rows_affected'] as num?)?.toInt() ?? 0);
 }
 
 class ResultGrid extends StatelessWidget {
@@ -24,8 +26,11 @@ class ResultGrid extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (result.columns.isEmpty) {
-      return const Padding(
-          padding: EdgeInsets.all(12), child: Text('执行成功（无结果集）'));
+      return Padding(
+          padding: const EdgeInsets.all(12),
+          child: Text(result.rowsAffected > 0
+              ? '${result.rowsAffected} 行受影响'
+              : '执行成功（无结果集）'));
     }
     final widths = _colWidths();
     const cellStyle = TextStyle(fontFamily: 'monospace', fontSize: 12);
