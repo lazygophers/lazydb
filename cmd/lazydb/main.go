@@ -11,6 +11,7 @@ import (
 	"os"
 
 	"github.com/lazygophers/lazydb/internal/api"
+	"github.com/lazygophers/lazydb/internal/cache"
 	"github.com/lazygophers/lazydb/internal/conn"
 	"github.com/lazygophers/lazydb/internal/runtimefile"
 	"github.com/lazygophers/lazydb/internal/source"
@@ -65,7 +66,13 @@ func run() error {
 		return fmt.Errorf("write runtime file: %w", err)
 	}
 
-	h := api.New(conn.NewManager(openSource), token)
+	store, err := cache.Open(*home)
+	if err != nil {
+		return fmt.Errorf("open cache.db: %w", err)
+	}
+	defer store.Close()
+
+	h := api.New(conn.NewManager(openSource), store, token)
 	log.Printf("lazydb sidecar listening on %s", ln.Addr())
 	srv := &http.Server{Handler: h}
 	return srv.Serve(ln)

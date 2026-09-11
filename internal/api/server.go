@@ -2,18 +2,21 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/lazygophers/lazydb/internal/cache"
 	"github.com/lazygophers/lazydb/internal/conn"
 	"github.com/lazygophers/lazydb/internal/source"
 )
 
-// New 组装路由。token 非空时启用 Bearer 鉴权。
-func New(m *conn.Manager, token string) http.Handler {
-	s := &server{m: m, token: token}
+// New 组装路由。cs 为 nil 时关缓存；token 非空时启用 Bearer 鉴权。
+func New(m *conn.Manager, cs *cache.Store, token string) http.Handler {
+	s := &server{m: m, store: cs, token: token, ttl: cache.DefaultTTL}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /api/connections", s.createConn)
@@ -26,6 +29,7 @@ func New(m *conn.Manager, token string) http.Handler {
 	mux.HandleFunc("GET /api/connections/{id}/indexes", s.indexes)
 	mux.HandleFunc("GET /api/connections/{id}/ddl", s.ddl)
 	mux.HandleFunc("GET /api/connections/{id}/capabilities", s.capabilities)
+	mux.HandleFunc("POST /api/connections/{id}/refresh", s.refresh)
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -35,7 +39,9 @@ func New(m *conn.Manager, token string) http.Handler {
 
 type server struct {
 	m     *conn.Manager
+	store *cache.Store
 	token string
+	ttl   time.Duration
 }
 
 // ---- 鉴权 ----
@@ -122,7 +128,10 @@ func (s *server) children(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return // getConn 已写响应
 	}
-	nodes, err := c.Src.Children(r.Context(), pathParam(r))
+	nodes, cached, err := cached(s, r.Context(), c, pathParam(r), cache.KindChildren,
+		func(ctx context.Context) ([]source.Node, error) {
+			return c.Src.Children(ctx, pathParam(r))
+		})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "children_failed", err.Error())
 		return
@@ -130,7 +139,7 @@ func (s *server) children(w http.ResponseWriter, r *http.Request) {
 	if nodes == nil {
 		nodes = []source.Node{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"nodes": nodes})
+	writeJSON(w, http.StatusOK, map[string]any{"nodes": nodes, "cached": cached})
 }
 
 func (s *server) exec(w http.ResponseWriter, r *http.Request) {
@@ -166,12 +175,16 @@ func (s *server) columns(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return // getConn 已写响应
 	}
-	cl, ok := c.Src.(source.ColumnLister)
-	if !ok {
+	cl, ok2 := c.Src.(source.ColumnLister)
+	if !ok2 {
 		writeErr(w, http.StatusNotImplemented, "unsupported", "source has no ColumnLister")
 		return
 	}
-	cols, err := cl.Columns(r.Context(), pathParam(r))
+	p := pathParam(r)
+	cols, _, err := cached(s, r.Context(), c, p, cache.KindColumns,
+		func(ctx context.Context) ([]source.Column, error) {
+			return cl.Columns(ctx, p)
+		})
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "sql_error", err.Error())
 		return
@@ -187,12 +200,16 @@ func (s *server) indexes(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return // getConn 已写响应
 	}
-	il, ok := c.Src.(source.IndexLister)
-	if !ok {
+	il, ok2 := c.Src.(source.IndexLister)
+	if !ok2 {
 		writeErr(w, http.StatusNotImplemented, "unsupported", "source has no IndexLister")
 		return
 	}
-	idxs, err := il.Indexes(r.Context(), pathParam(r))
+	p := pathParam(r)
+	idxs, _, err := cached(s, r.Context(), c, p, cache.KindIndexes,
+		func(ctx context.Context) ([]source.Index, error) {
+			return il.Indexes(ctx, p)
+		})
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "sql_error", err.Error())
 		return
@@ -208,17 +225,69 @@ func (s *server) ddl(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return // getConn 已写响应
 	}
-	ds, ok := c.Src.(source.DDLShower)
-	if !ok {
+	ds, ok2 := c.Src.(source.DDLShower)
+	if !ok2 {
 		writeErr(w, http.StatusNotImplemented, "unsupported", "source has no DDLShower")
 		return
 	}
-	ddl, err := ds.DDL(r.Context(), pathParam(r))
+	p := pathParam(r)
+	ddl, _, err := cached(s, r.Context(), c, p, cache.KindDDL,
+		func(ctx context.Context) (string, error) {
+			return ds.DDL(ctx, p)
+		})
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "not_found", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"ddl": ddl})
+}
+
+// refresh 手动强制刷新：丢缓存后立刻重拉指定 path（表则含字段/索引/DDL）。
+func (s *server) refresh(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.getConn(w, r)
+	if !ok {
+		return // getConn 已写响应
+	}
+	var req struct {
+		Path []string `json:"path"`
+	}
+	if err := decode(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if s.store != nil {
+		if err := s.store.Drop(r.Context(), c.Key(), req.Path); err != nil {
+			writeErr(w, http.StatusInternalServerError, "cache_error", err.Error())
+			return
+		}
+	}
+	p := source.Path(req.Path)
+	refreshed := map[string]bool{}
+	if nodes, err := c.Src.Children(r.Context(), p); err == nil && s.store != nil {
+		_ = s.store.Save(r.Context(), c.Key(), req.Path, cache.KindChildren, nodes, time.Now())
+		refreshed["children"] = true
+	}
+	if len(p) >= 2 { // 表级：连带字段/索引/DDL
+		if cl, ok := c.Src.(source.ColumnLister); ok && s.store != nil {
+			if v, err := cl.Columns(r.Context(), p); err == nil {
+				_ = s.store.Save(r.Context(), c.Key(), req.Path, cache.KindColumns, v, time.Now())
+				refreshed["columns"] = true
+			}
+		}
+		if il, ok := c.Src.(source.IndexLister); ok && s.store != nil {
+			if v, err := il.Indexes(r.Context(), p); err == nil {
+				_ = s.store.Save(r.Context(), c.Key(), req.Path, cache.KindIndexes, v, time.Now())
+				refreshed["indexes"] = true
+			}
+		}
+		if ds, ok := c.Src.(source.DDLShower); ok && s.store != nil {
+			if v, err := ds.DDL(r.Context(), p); err == nil {
+				_ = s.store.Save(r.Context(), c.Key(), req.Path, cache.KindDDL, v, time.Now())
+				refreshed["ddl"] = true
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"refreshed": refreshed})
 }
 
 func (s *server) capabilities(w http.ResponseWriter, r *http.Request) {
@@ -247,6 +316,34 @@ func (s *server) getConn(w http.ResponseWriter, r *http.Request) (*conn.Conn, bo
 // pathParam 把重复的 ?path=a&path=b 查询参数拼成 source.Path。
 func pathParam(r *http.Request) source.Path {
 	return source.Path(r.URL.Query()["path"])
+}
+
+// cached 是缓存优先读取（ADR-0004）：新鲜缓存直接回；过期或没有就拉源并写回；
+// 源失败但有陈旧缓存 → 回陈旧（离线浏览）。cached=true 表示本次走了缓存。
+func cached[T any](s *server, ctx context.Context, c *conn.Conn, path source.Path, kind string, pull func(context.Context) (T, error)) (v T, fromCache bool, err error) {
+	if s.store != nil {
+		if e, ok, gerr := s.store.Get(ctx, c.Key(), path, kind); gerr == nil && ok && time.Since(e.FetchedAt) < s.ttl {
+			if jerr := json.Unmarshal(e.Payload, &v); jerr == nil {
+				return v, true, nil
+			}
+		}
+	}
+	v, err = pull(ctx)
+	if err != nil {
+		if s.store != nil {
+			if e, ok, gerr := s.store.Get(ctx, c.Key(), path, kind); gerr == nil && ok {
+				var stale T
+				if jerr := json.Unmarshal(e.Payload, &stale); jerr == nil {
+					return stale, true, nil
+				}
+			}
+		}
+		return v, false, err
+	}
+	if s.store != nil {
+		_ = s.store.Save(ctx, c.Key(), path, kind, v, time.Now())
+	}
+	return v, false, nil
 }
 
 func decode(r *http.Request, v any) error {

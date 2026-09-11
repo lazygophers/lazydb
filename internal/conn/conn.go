@@ -3,6 +3,8 @@ package conn
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sync"
 
@@ -23,9 +25,9 @@ type Manager struct {
 
 // Conn 是一条已打开的连接。
 type Conn struct {
-	ID   string         `json:"id"`
-	Name string         `json:"name"`
-	Cfg  source.Config  `json:"config"`
+	ID   string        `json:"id"`
+	Name string        `json:"name"`
+	Cfg  source.Config `json:"config"`
 	Src  source.Source `json:"-"`
 }
 
@@ -87,4 +89,11 @@ func (m *Manager) Remove(id string) error {
 		return fmt.Errorf("connection %q not found", id)
 	}
 	return c.Src.Close()
+}
+
+// Key 是连接的稳定标识（驱动+DSN 的哈希），作 cache.db 的 conn 列：
+// 同一个库换个显示名重新连上，缓存仍然命中。
+func (c *Conn) Key() string {
+	sum := sha256.Sum256([]byte(c.Cfg.Driver + "\x00" + c.Cfg.DSN))
+	return hex.EncodeToString(sum[:8])
 }
