@@ -1,5 +1,7 @@
 // lazydb 桌面界面（#20）：左连接列表、中结构树（懒加载）、右 SQL + 结果。
 // 界面零业务逻辑：所有数据经 Backend 的 HTTP API（ADR-0001）。
+import 'dart:io' show exit;
+
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -111,7 +113,30 @@ class _HomePageState extends State<HomePage> {
     final dsn =
         TextEditingController(text: old?['config']?['dsn'] ?? '');
     var driver = old?['config']?['driver'] ?? 'sqlite';
+    final oldSsh = (old?['config']?['ssh'] as Map<String, dynamic>?);
+    var useSsh = oldSsh != null;
+    var sshPort = (oldSsh?['port'] as num?)?.toInt() ?? 22;
+    var targetPort = (oldSsh?['target_port'] as num?)?.toInt() ?? 3306;
+    final sshHost = TextEditingController(text: oldSsh?['host'] ?? '');
+    final sshUser = TextEditingController(text: oldSsh?['user'] ?? 'root');
+    final sshKey = TextEditingController(text: oldSsh?['key_path'] ?? '');
+    final sshTarget =
+        TextEditingController(text: oldSsh?['target_host'] ?? '127.0.0.1');
     String testMsg = '';
+    // 组 config：SSH 区块只在勾选时带上
+    Map<String, dynamic> cfg() => {
+          'driver': driver,
+          'dsn': dsn.text,
+          if (useSsh)
+            'ssh': {
+              'host': sshHost.text,
+              'port': sshPort,
+              'user': sshUser.text,
+              'key_path': sshKey.text,
+              'target_host': sshTarget.text,
+              'target_port': targetPort,
+            },
+        };
     await showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -137,6 +162,56 @@ class _HomePageState extends State<HomePage> {
                   controller: dsn,
                   decoration: const InputDecoration(
                       labelText: 'DSN（sqlite 填文件路径，mysql 填连接串）')),
+              CheckboxListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: const Text('经 SSH 隧道', style: TextStyle(fontSize: 13)),
+                value: useSsh,
+                onChanged: (v) => setDialog(() => useSsh = v!),
+              ),
+              if (useSsh) ...[
+                TextField(
+                    controller: sshHost,
+                    decoration: const InputDecoration(
+                        isDense: true, labelText: '跳板机主机')),
+                Row(children: [
+                  Expanded(
+                      child: TextField(
+                          controller: sshUser,
+                          decoration: const InputDecoration(
+                              isDense: true, labelText: '跳板机用户'))),
+                  const SizedBox(width: 8),
+                  SizedBox(
+                      width: 80,
+                      child: TextField(
+                          controller: TextEditingController(text: '$sshPort'),
+                          decoration: const InputDecoration(
+                              isDense: true, labelText: '端口'),
+                          keyboardType: TextInputType.number,
+                          onChanged: (v) =>
+                              sshPort = int.tryParse(v) ?? 22)),
+                ]),
+                TextField(
+                    controller: sshKey,
+                    decoration: const InputDecoration(
+                        isDense: true, labelText: 'SSH 私钥文件路径')),
+                Row(children: [
+                  Expanded(
+                      child: TextField(
+                          controller: sshTarget,
+                          decoration: const InputDecoration(
+                              isDense: true, labelText: '目标主机（隧道终点）'))),
+                  const SizedBox(width: 8),
+                  SizedBox(
+                      width: 80,
+                      child: TextField(
+                          controller: TextEditingController(text: '$targetPort'),
+                          decoration: const InputDecoration(
+                              isDense: true, labelText: '目标端口'),
+                          keyboardType: TextInputType.number,
+                          onChanged: (v) =>
+                              targetPort = int.tryParse(v) ?? 3306)),
+                ]),              ],
               const SizedBox(height: 8),
               Text(testMsg, style: const TextStyle(fontSize: 12)),
             ]),
@@ -146,8 +221,7 @@ class _HomePageState extends State<HomePage> {
               onPressed: () async {
                 setDialog(() => testMsg = '测试中…');
                 try {
-                  final r = await be!.testConnection(
-                      {'driver': driver, 'dsn': dsn.text});
+                  final r = await be!.testConnection(cfg());
                   setDialog(() =>
                       testMsg = r['ok'] == true ? '连通 ✓' : '不通：${r['error']}');
                 } catch (e) {
@@ -165,8 +239,7 @@ class _HomePageState extends State<HomePage> {
                     await be!.deleteConnection(oldId);
                     trees.remove(oldId);
                   }
-                  await be!.createConnection(
-                      name.text, {'driver': driver, 'dsn': dsn.text});
+                  await be!.createConnection(name.text, cfg());
                   await _reload();
                   if (context.mounted) Navigator.pop(context);
                 } catch (e) {
@@ -179,6 +252,10 @@ class _HomePageState extends State<HomePage> {
         ),
       ),
     );
+    sshHost.dispose();
+    sshUser.dispose();
+    sshKey.dispose();
+    sshTarget.dispose();
   }
 
   Future<void> _deleteConn(String id) async {
@@ -458,6 +535,13 @@ class _HomePageState extends State<HomePage> {
         child: Row(children: [
           const Text('连接'),
           const Spacer(),
+          IconButton(
+              tooltip: '退出后端（含界面与全部驱动进程）',
+              icon: const Icon(Icons.power_settings_new, size: 18),
+              onPressed: () async {
+                await be!.shutdown();
+                exit(0);
+              }),
           IconButton(
               tooltip: '新建连接',
               icon: const Icon(Icons.add),

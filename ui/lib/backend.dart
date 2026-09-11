@@ -125,6 +125,15 @@ class Backend {
   Future<void> refresh(String id, List<String> path) =>
       _json('POST', '/api/connections/$id/refresh', body: {'path': path});
 
+  /// 完全退出后端（界面随之退出）。
+  Future<void> shutdown() async {
+    try {
+      final req = await _http.openUrl('POST', Uri.parse('$base/api/shutdown'));
+      req.headers.set('Authorization', 'Bearer $token');
+      await req.close().drain<void>();
+    } catch (_) {/* 连接断开也视为已退 */}
+  }
+
   Future<dynamic> testConnection(Map<String, dynamic> cfg) =>
       _json('POST', '/api/test-connection', body: {'config': cfg});
 

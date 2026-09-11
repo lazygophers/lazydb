@@ -90,14 +90,22 @@ jobs:
           elif [[ "$RUNNER_OS" == "Linux" ]]; then
             sudo apt-get update -qq && sudo apt-get install -y -qq mysql-server
             sudo service mysql start
-            sleep 2
-            sudo mysql -e "CREATE DATABASE IF NOT EXISTS lazytest;"
-            sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'root'; FLUSH PRIVILEGES;"
-            DSN="root:root@tcp(127.0.0.1:3306)/lazytest?timeout=5s"
+            for i in $(seq 1 30); do sudo mysqladmin ping --silent && break; sleep 2; done
+            sudo mysql -e "CREATE DATABASE IF NOT EXISTS lazytest;
+              CREATE USER IF NOT EXISTS 'lazy'@'localhost' IDENTIFIED BY 'lazy';
+              CREATE USER IF NOT EXISTS 'lazy'@'127.0.0.1' IDENTIFIED BY 'lazy';
+              CREATE USER IF NOT EXISTS 'lazy'@'%' IDENTIFIED BY 'lazy';
+              GRANT ALL ON lazytest.* TO 'lazy'@'localhost';
+              GRANT ALL ON lazytest.* TO 'lazy'@'127.0.0.1';
+              GRANT ALL ON lazytest.* TO 'lazy'@'%'; FLUSH PRIVILEGES;"
+            DSN="lazy:lazy@tcp(127.0.0.1:3306)/lazytest?timeout=5s"
           else
-            docker run -d --name mysql -p 3306:3306 -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=lazytest mysql:8
-            for i in $(seq 1 60); do docker exec mysql mysqladmin ping -uroot -proot --silent && break; sleep 2; done
-            DSN="root:root@tcp(127.0.0.1:3306)/lazytest?timeout=5s"
+            # runner 的 docker 是 Windows 容器模式，拉不了 linux mysql 镜像；用 choco zip 版（root 默认无密码）
+            choco install -y --no-progress mysql-essentials
+            export PATH="/c/tools/mysql/current/bin:$PATH"
+            for i in $(seq 1 30); do mysqladmin -uroot ping --silent && break; sleep 2; done
+            mysql -uroot -e "CREATE DATABASE IF NOT EXISTS lazytest;"
+            DSN="root@tcp(127.0.0.1:3306)/lazytest?timeout=5s&allowNativePassword=true"
           fi
           LAZYDB_MYSQL_DSN="$DSN" go test -count=1 -timeout 120s -run 'TestMySQLFullChainDirect' ./internal/api/
       - uses: actions/upload-artifact@v4

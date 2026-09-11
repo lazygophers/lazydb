@@ -131,7 +131,14 @@ func run() error {
 
 	h := api.New(m, store, token, hist, aud)
 	log.Printf("lazydb sidecar listening on %s", ln.Addr())
-	srv := &http.Server{Handler: h}
+	root := http.NewServeMux()
+	root.Handle("/", h)
+	srv := &http.Server{Handler: root}
+	// 完全退出（ADR-0007）：v1 以界面内「退出后端」替代托盘菜单（见 ADR-0007 注）
+	root.HandleFunc("POST /api/shutdown", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+		go srv.Close()
+	})
 	return srv.Serve(ln)
 }
 
