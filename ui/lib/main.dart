@@ -1,0 +1,477 @@
+// lazydb 桌面界面（#20）：左连接列表、中结构树（懒加载）、右 SQL + 结果。
+// 界面零业务逻辑：所有数据经 Backend 的 HTTP API（ADR-0001）。
+import 'package:flutter/material.dart';
+
+import 'backend.dart';
+import 'result_grid.dart';
+
+void main() {
+  runApp(const LazyDbApp());
+}
+
+class LazyDbApp extends StatelessWidget {
+  const LazyDbApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'lazydb',
+      theme: ThemeData(
+          useMaterial3: true,
+          colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF4F8CC9), brightness: Brightness.dark)),
+      home: const HomePage(),
+    );
+  }
+}
+
+// ---- 结构树节点（纯 UI 状态，展开即经 API 懒加载子层） ----
+
+class TreeNode {
+  TreeNode(this.label, this.kind, this.path);
+  final String label;
+  final String kind; // conn | database | table | view | cols | idx | ddl | leaf | error
+  final List<String> path; // API 的 path 参数
+  bool expanded = false;
+  bool loaded = false;
+  bool loading = false;
+  List<TreeNode> children = [];
+}
+
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
+
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  Backend? be;
+  String? bootError;
+  List<dynamic> conns = [];
+  final trees = <String, List<TreeNode>>{}; // connID → 根层节点
+  String? selectedConn;
+
+  QueryResult? result;
+  String runError = '';
+  bool running = false;
+  String? ddlText;
+  final sql = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _boot();
+  }
+
+  Future<void> _boot() async {
+    setState(() {
+      be = null;
+      bootError = null;
+    });
+    try {
+      final b = await Backend.attach(Backend.findBinary());
+      setState(() => be = b);
+      await _reload();
+    } catch (e) {
+      setState(() => bootError = '$e');
+    }
+  }
+
+  Future<void> _reload() async {
+    final list = await be!.listConnections();
+    setState(() => conns = list);
+    final ids = list.map((c) => c['id'] as String).toSet();
+    trees.removeWhere((id, _) => !ids.contains(id));
+  }
+
+  // ---- 连接 ----
+
+  Future<void> _connDialog({Map<String, dynamic>? old, String? oldId}) async {
+    final name = TextEditingController(text: old?['name'] ?? '');
+    final dsn =
+        TextEditingController(text: old?['config']?['dsn'] ?? '');
+    var driver = old?['config']?['driver'] ?? 'sqlite';
+    String testMsg = '';
+    await showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialog) => AlertDialog(
+          title: Text(oldId == null ? '新建连接' : '编辑连接'),
+          content: SizedBox(
+            width: 460,
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(
+                  controller: name,
+                  decoration: const InputDecoration(labelText: '名称')),
+              const SizedBox(height: 8),
+              DropdownButtonFormField<String>(
+                initialValue: driver,
+                items: const [
+                  DropdownMenuItem(value: 'sqlite', child: Text('SQLite')),
+                  DropdownMenuItem(value: 'mysql', child: Text('MySQL')),
+                ],
+                onChanged: (v) => setDialog(() => driver = v!),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                  controller: dsn,
+                  decoration: const InputDecoration(
+                      labelText: 'DSN（sqlite 填文件路径，mysql 填连接串）')),
+              const SizedBox(height: 8),
+              Text(testMsg, style: const TextStyle(fontSize: 12)),
+            ]),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                setDialog(() => testMsg = '测试中…');
+                try {
+                  final r = await be!.testConnection(
+                      {'driver': driver, 'dsn': dsn.text});
+                  setDialog(() =>
+                      testMsg = r['ok'] == true ? '连通 ✓' : '不通：${r['error']}');
+                } catch (e) {
+                  setDialog(() => testMsg = '不通：$e');
+                }
+              },
+              child: const Text('测试连通'),
+            ),
+            TextButton(
+                onPressed: () => Navigator.pop(context), child: const Text('取消')),
+            FilledButton(
+              onPressed: () async {
+                try {
+                  if (oldId != null) {
+                    await be!.deleteConnection(oldId);
+                    trees.remove(oldId);
+                  }
+                  await be!.createConnection(
+                      name.text, {'driver': driver, 'dsn': dsn.text});
+                  await _reload();
+                  if (context.mounted) Navigator.pop(context);
+                } catch (e) {
+                  setDialog(() => testMsg = '保存失败：$e');
+                }
+              },
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _deleteConn(String id) async {
+    await be!.deleteConnection(id);
+    trees.remove(id);
+    if (selectedConn == id) setState(() => selectedConn = null);
+    await _reload();
+  }
+
+  // ---- 结构树懒加载 ----
+
+  Future<void> _toggle(String connId, TreeNode n) async {
+    if (n.kind == 'ddl') {
+      await _showDdl(connId, n);
+      return;
+    }
+    n.expanded = !n.expanded;
+    setState(() {});
+    if (!n.expanded || n.loaded || n.loading) return;
+    n.loading = true;
+    setState(() {});
+    try {
+      final kids = <TreeNode>[];
+      switch (n.kind) {
+        case 'conn':
+          for (final node in await be!.children(connId, [])) {
+            kids.add(TreeNode(node['name'], node['kind'], [node['name']]));
+          }
+        case 'database':
+          for (final node in await be!.children(connId, n.path)) {
+            final t = TreeNode(node['name'], node['kind'], [...n.path, node['name']]);
+            kids.add(t);
+          }
+        case 'table':
+        case 'view':
+          kids.addAll([
+            TreeNode('字段', 'cols', n.path),
+            TreeNode('索引', 'idx', n.path),
+            TreeNode('DDL', 'ddl', n.path),
+          ]);
+        case 'cols':
+          final r = await be!.columns(connId, n.path);
+          for (final c in r['columns']) {
+            final nullTxt = c['nullable'] == true ? '' : ' NOT NULL';
+            kids.add(TreeNode(
+                '${c['name']}  ${c['type']}$nullTxt', 'leaf', n.path));
+          }
+        case 'idx':
+          final r = await be!.indexes(connId, n.path);
+          for (final i in r['indexes']) {
+            final u = i['unique'] == true ? 'UNIQUE ' : '';
+            kids.add(TreeNode(
+                '$u${i['name']} (${(i['columns'] as List).join(', ')})',
+                'leaf',
+                n.path));
+          }
+        default:
+          break;
+      }
+      n.children = kids;
+      n.loaded = true;
+    } catch (e) {
+      n.children = [TreeNode('$e', 'error', n.path)];
+    } finally {
+      n.loading = false;
+      setState(() {});
+    }
+  }
+
+  Future<void> _showDdl(String connId, TreeNode n) async {
+    setState(() {
+      ddlText = '加载中…';
+      result = null;
+    });
+    try {
+      final ddl = await be!.ddl(connId, n.path);
+      setState(() => ddlText = ddl);
+    } catch (e) {
+      setState(() => ddlText = '$e');
+    }
+  }
+
+  Future<void> _runSql() async {
+    if (selectedConn == null || sql.text.trim().isEmpty) return;
+    setState(() {
+      running = true;
+      runError = '';
+      ddlText = null;
+    });
+    try {
+      result = QueryResult.fromJson(
+          await be!.exec(selectedConn!, sql.text) as Map<String, dynamic>);
+    } catch (e) {
+      result = null;
+      runError = '$e';
+    } finally {
+      setState(() => running = false);
+    }
+  }
+
+  // ---- 布局 ----
+
+  @override
+  Widget build(BuildContext context) {
+    if (bootError != null) {
+      return Scaffold(
+        body: Center(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Text('后端不可用：$bootError'),
+            const SizedBox(height: 8),
+            FilledButton(onPressed: _boot, child: const Text('重试')),
+          ]),
+        ),
+      );
+    }
+    if (be == null) {
+      return const Scaffold(body: Center(child: Text('连接后端…')));
+    }
+    return Scaffold(
+      body: Row(children: [
+        SizedBox(width: 230, child: _connsPane()),
+        const VerticalDivider(width: 1),
+        SizedBox(width: 300, child: _treePane()),
+        const VerticalDivider(width: 1),
+        Expanded(child: _queryPane()),
+      ]),
+    );
+  }
+
+  Widget _connsPane() {
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Padding(
+        padding: const EdgeInsets.all(8),
+        child: Row(children: [
+          const Text('连接'),
+          const Spacer(),
+          IconButton(
+              tooltip: '新建连接',
+              icon: const Icon(Icons.add),
+              onPressed: () => _connDialog()),
+        ]),
+      ),
+      Expanded(
+        child: ListView.builder(
+          itemCount: conns.length,
+          itemBuilder: (context, i) {
+            final c = conns[i] as Map<String, dynamic>;
+            final id = c['id'] as String;
+            return ListTile(
+              dense: true,
+              selected: selectedConn == id,
+              title: Text('${c['name']}'),
+              subtitle: Text('${c['config']['driver']}',
+                  style: const TextStyle(fontSize: 11)),
+              onTap: () => setState(() => selectedConn = id),
+              trailing: PopupMenuButton<String>(
+                onSelected: (op) => op == 'edit'
+                    ? _connDialog(old: c, oldId: id)
+                    : _deleteConn(id),
+                itemBuilder: (_) => const [
+                  PopupMenuItem(value: 'edit', child: Text('编辑')),
+                  PopupMenuItem(value: 'delete', child: Text('删除')),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    ]);
+  }
+
+  Widget _treePane() {
+    if (selectedConn == null) {
+      return const Center(
+          child: Text('先选一个连接', style: TextStyle(color: Colors.grey)));
+    }
+    final roots = trees.putIfAbsent(selectedConn!, () => []);
+    if (roots.isEmpty) {
+      // 根 = 连接自身
+      final c = conns.firstWhere((x) => x['id'] == selectedConn)
+          as Map<String, dynamic>;
+      roots.add(TreeNode('${c['name']}', 'conn', []));
+    }
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Padding(
+        padding: const EdgeInsets.all(8),
+        child: Row(children: [
+          const Text('结构'),
+          const Spacer(),
+          IconButton(
+              tooltip: '刷新缓存',
+              icon: const Icon(Icons.refresh),
+              onPressed: () async {
+                await be!.refresh(selectedConn!, []);
+                trees.remove(selectedConn);
+                setState(() {});
+              }),
+        ]),
+      ),
+      Expanded(
+        child: ListView(children: [for (final n in roots) _treeNode(selectedConn!, n, 0)]),
+      ),
+    ]);
+  }
+
+  Widget _treeNode(String connId, TreeNode n, int depth) {
+    final expandable = switch (n.kind) {
+      'conn' || 'database' || 'table' || 'view' || 'cols' || 'idx' => true,
+      _ => false,
+    };
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      InkWell(
+        onTap: expandable || n.kind == 'ddl' ? () => _toggle(connId, n) : null,
+        child: Padding(
+          padding: EdgeInsets.only(left: 8.0 + depth * 14, top: 3, bottom: 3),
+          child: Row(children: [
+            if (expandable)
+              Icon(
+                n.expanded
+                    ? Icons.keyboard_arrow_down
+                    : Icons.keyboard_arrow_right,
+                size: 16,
+                color: Colors.grey,
+              )
+            else
+              const SizedBox(width: 16),
+            const SizedBox(width: 2),
+            Flexible(
+                child: Text(n.label,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: n.kind == 'error' ? Colors.redAccent : null,
+                        fontFamily:
+                            n.kind == 'leaf' || n.kind == 'error' ? 'monospace' : null))),
+            if (n.loading)
+              const Padding(
+                padding: EdgeInsets.only(left: 6),
+                child: SizedBox(
+                    width: 10,
+                    height: 10,
+                    child: CircularProgressIndicator(strokeWidth: 2)),
+              ),
+          ]),
+        ),
+      ),
+      if (n.expanded)
+        Padding(
+          padding: const EdgeInsets.only(left: 4),
+          child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final c in n.children) _treeNode(connId, c, depth + 1)
+              ]),
+        ),
+    ]);
+  }
+
+  Widget _queryPane() {
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Padding(
+        padding: const EdgeInsets.all(8),
+        child: Row(children: [
+          Expanded(
+            child: TextField(
+              controller: sql,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+              maxLines: 3,
+              minLines: 1,
+              decoration: const InputDecoration(
+                  isDense: true,
+                  hintText: 'SQL（仅当前选中连接）',
+                  border: OutlineInputBorder()),
+              onSubmitted: (_) => _runSql(),
+            ),
+          ),
+          const SizedBox(width: 8),
+          FilledButton(
+            onPressed: selectedConn == null || running ? null : _runSql,
+            child: running
+                ? const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Text('执行'),
+          ),
+        ]),
+      ),
+      if (runError.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          child: Text(runError, style: const TextStyle(color: Colors.redAccent)),
+        ),
+      Expanded(
+        child: ddlText != null
+            ? SingleChildScrollView(
+                padding: const EdgeInsets.all(8),
+                child: SelectableText(ddlText!,
+                    style: const TextStyle(fontFamily: 'monospace', fontSize: 12)))
+            : result != null
+                ? ResultGrid(result: result!)
+                : const Center(
+                    child: Text('选表看结构，或输入 SQL 执行',
+                        style: TextStyle(color: Colors.grey))),
+      ),
+      if (result != null)
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          child: Text(
+              '${result!.rows.length} 行${result!.truncated ? '（已截断）' : ''}',
+              style: const TextStyle(fontSize: 11, color: Colors.grey)),
+        ),
+    ]);
+  }
+}
