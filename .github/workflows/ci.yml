@@ -74,3 +74,35 @@ jobs:
           CGO_ENABLED=0 go build -o lazydb-driver-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }} ./cmd/lazydb-driver
           CGO_ENABLED=0 go build -o lazydb-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }} ./cmd/lazydb
         if: matrix.goos != 'windows'
+        shell: bash
+      # 三平台各跑通 MySQL 直连单链路（#25）：本机 arch 才跑，交叉项只验编译
+      - name: MySQL single-link test (native arch)
+        if: matrix.goos == 'linux' || (matrix.goos == 'darwin' && matrix.goarch == 'arm64') || matrix.goos == 'windows'
+        shell: bash
+        run: |
+          set -e
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            brew install mysql >/dev/null
+            brew services start mysql
+            sleep 5
+            mysql -uroot -e "CREATE DATABASE IF NOT EXISTS lazytest;"
+            DSN="root@tcp(127.0.0.1:3306)/lazytest?timeout=5s"
+          elif [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq mysql-server
+            sudo service mysql start
+            sleep 2
+            sudo mysql -e "CREATE DATABASE IF NOT EXISTS lazytest;"
+            sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'root'; FLUSH PRIVILEGES;"
+            DSN="root:root@tcp(127.0.0.1:3306)/lazytest?timeout=5s"
+          else
+            docker run -d --name mysql -p 3306:3306 -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=lazytest mysql:8
+            for i in $(seq 1 60); do docker exec mysql mysqladmin ping -uroot -proot --silent && break; sleep 2; done
+            DSN="root:root@tcp(127.0.0.1:3306)/lazytest?timeout=5s"
+          fi
+          LAZYDB_MYSQL_DSN="$DSN" go test -count=1 -timeout 120s -run 'TestMySQLFullChainDirect' ./internal/api/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazydb-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            lazydb-driver-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
+            lazydb-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}

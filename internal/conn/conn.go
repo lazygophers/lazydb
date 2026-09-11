@@ -18,6 +18,9 @@ type OpenFunc func(cfg source.Config) (source.Source, error)
 type Manager struct {
 	Open OpenFunc
 
+	// Persist 非空时，连接增删后调用（connstore 装上，落 connections.json + 钥匙串）。
+	Persist func()
+
 	mu    sync.Mutex
 	conns map[string]*Conn
 	next  int
@@ -45,11 +48,14 @@ func (m *Manager) Add(ctx context.Context, name string, cfg source.Config) (*Con
 		return nil, fmt.Errorf("open %s: %w", cfg.Driver, err)
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.next++
 	id := fmt.Sprintf("%d", m.next)
 	c := &Conn{ID: id, Name: name, Cfg: cfg, Src: src}
 	m.conns[id] = c
+	m.mu.Unlock()
+	if m.Persist != nil {
+		m.Persist() // 锁外：persist 要读 List
+	}
 	return c, nil
 }
 
@@ -88,7 +94,13 @@ func (m *Manager) Remove(id string) error {
 	if !ok {
 		return fmt.Errorf("connection %q not found", id)
 	}
-	return c.Src.Close()
+	if err := c.Src.Close(); err != nil {
+		return err
+	}
+	if m.Persist != nil {
+		m.Persist()
+	}
+	return nil
 }
 
 // Key 是连接的稳定标识（驱动+DSN 的哈希），作 cache.db 的 conn 列：

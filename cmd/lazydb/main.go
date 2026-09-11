@@ -17,10 +17,12 @@ import (
 	"github.com/lazygophers/lazydb/internal/audit"
 	"github.com/lazygophers/lazydb/internal/cache"
 	"github.com/lazygophers/lazydb/internal/conn"
+	"github.com/lazygophers/lazydb/internal/connstore"
 	"github.com/lazygophers/lazydb/internal/driverhost"
 	"github.com/lazygophers/lazydb/internal/history"
 	"github.com/lazygophers/lazydb/internal/mcpserver"
 	"github.com/lazygophers/lazydb/internal/runtimefile"
+	"github.com/lazygophers/lazydb/internal/secrets"
 	"github.com/lazygophers/lazydb/internal/source"
 )
 
@@ -115,7 +117,19 @@ func run() error {
 		}
 	}
 
-	h := api.New(conn.NewManager(open), store, token, hist, aud)
+	// 凭据与连接持久化（#25）：DSN 进 OS 钥匙串，磁盘只留元数据。
+	// 钥匙串不可用（无头 Linux 等）则连接重启即丢，功能不受影响。
+	sec, secErr := secrets.Open()
+	if secErr != nil {
+		log.Printf("钥匙串不可用（%v）：连接凭据不持久化", secErr)
+		sec = nil
+	}
+	m := conn.NewManager(open)
+	if err := connstore.Wire(m, sec, *home); err != nil {
+		log.Printf("恢复已存连接失败：%v", err)
+	}
+
+	h := api.New(m, store, token, hist, aud)
 	log.Printf("lazydb sidecar listening on %s", ln.Addr())
 	srv := &http.Server{Handler: h}
 	return srv.Serve(ln)
