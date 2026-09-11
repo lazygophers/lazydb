@@ -75,9 +75,10 @@ jobs:
           CGO_ENABLED=0 go build -o lazydb-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }} ./cmd/lazydb
         if: matrix.goos != 'windows'
         shell: bash
-      # 三平台各跑通 MySQL 直连单链路（#25）：本机 arch 才跑，交叉项只验编译
+      # macOS/Windows 各跑通 MySQL 直连单链路（#25）；linux 由上面 test job 的
+      # mysql:8 service 容器覆盖（全量含 SSH 隧道），不在此重复
       - name: MySQL single-link test (native arch)
-        if: matrix.goos == 'linux' || (matrix.goos == 'darwin' && matrix.goarch == 'arm64') || matrix.goos == 'windows'
+        if: (matrix.goos == 'darwin' && matrix.goarch == 'arm64') || matrix.goos == 'windows'
         shell: bash
         run: |
           set -e
@@ -87,21 +88,10 @@ jobs:
             sleep 5
             mysql -uroot -e "CREATE DATABASE IF NOT EXISTS lazytest;"
             DSN="root@tcp(127.0.0.1:3306)/lazytest?timeout=5s"
-          elif [[ "$RUNNER_OS" == "Linux" ]]; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq mysql-server
-            sudo service mysql start
-            for i in $(seq 1 30); do sudo mysqladmin ping --silent && break; sleep 2; done
-            sudo mysql -e "CREATE DATABASE IF NOT EXISTS lazytest;
-              CREATE USER IF NOT EXISTS 'lazy'@'localhost' IDENTIFIED BY 'lazy';
-              CREATE USER IF NOT EXISTS 'lazy'@'127.0.0.1' IDENTIFIED BY 'lazy';
-              CREATE USER IF NOT EXISTS 'lazy'@'%' IDENTIFIED BY 'lazy';
-              GRANT ALL ON lazytest.* TO 'lazy'@'localhost';
-              GRANT ALL ON lazytest.* TO 'lazy'@'127.0.0.1';
-              GRANT ALL ON lazytest.* TO 'lazy'@'%'; FLUSH PRIVILEGES;"
-            DSN="lazy:lazy@tcp(127.0.0.1:3306)/lazytest?timeout=5s"
           else
-            # runner 的 docker 是 Windows 容器模式，拉不了 linux mysql 镜像；用 choco zip 版（root 默认无密码）
-            choco install -y --no-progress mysql-essentials
+            # runner 的 docker 是 Windows 容器模式，拉不了 linux mysql 镜像；choco zip 版
+            # 自动 --initialize-insecure 并装成 Windows 服务（root 无密码）
+            choco install -y --no-progress mysql
             export PATH="/c/tools/mysql/current/bin:$PATH"
             for i in $(seq 1 30); do mysqladmin -uroot ping --silent && break; sleep 2; done
             mysql -uroot -e "CREATE DATABASE IF NOT EXISTS lazytest;"
