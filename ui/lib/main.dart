@@ -1,9 +1,12 @@
 // lazydb 桌面界面（#20）：左连接列表、中结构树（懒加载）、右 SQL + 结果。
 // 界面零业务逻辑：所有数据经 Backend 的 HTTP API（ADR-0001）。
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:re_editor/re_editor.dart';
 
 import 'backend.dart';
 import 'result_grid.dart';
+import 'sql_editor.dart';
 
 void main() {
   runApp(const LazyDbApp());
@@ -56,11 +59,20 @@ class _HomePageState extends State<HomePage> {
   String runError = '';
   bool running = false;
   String? ddlText;
-  final sql = TextEditingController();
+  final sql = CodeLineEditingController.fromText('');
+  final words = SqlWords();
+  final tableDb = <String, String>{}; // 表名 → 库名（补全取字段用）
+
+  @override
+  void dispose() {
+    sql.dispose();
+    super.dispose();
+  }
 
   @override
   void initState() {
     super.initState();
+    words.onTableMiss = _fetchColumns;
     _boot();
   }
 
@@ -202,7 +214,9 @@ class _HomePageState extends State<HomePage> {
           ]);
         case 'cols':
           final r = await be!.columns(connId, n.path);
-          for (final c in r['columns']) {
+          final cols = (r['columns'] as List).cast<Map<String, dynamic>>();
+          words.setColumns(n.path.last, cols); // 树里看过的表直接进补全词
+          for (final c in cols) {
             final nullTxt = c['nullable'] == true ? '' : ' NOT NULL';
             kids.add(TreeNode(
                 '${c['name']}  ${c['type']}$nullTxt', 'leaf', n.path));
@@ -243,7 +257,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _runSql() async {
-    if (selectedConn == null || sql.text.trim().isEmpty) return;
+    if (selectedConn == null) return;
+    final text = sql.selectedText.trim().isNotEmpty ? sql.selectedText : sql.text;
+    if (text.trim().isEmpty) return;
     setState(() {
       running = true;
       runError = '';
@@ -251,13 +267,39 @@ class _HomePageState extends State<HomePage> {
     });
     try {
       result = QueryResult.fromJson(
-          await be!.exec(selectedConn!, sql.text) as Map<String, dynamic>);
+          await be!.exec(selectedConn!, text) as Map<String, dynamic>);
     } catch (e) {
       result = null;
       runError = '$e';
     } finally {
       setState(() => running = false);
     }
+  }
+
+  // ---- 补全供词（全走缓存接口，断网时后端 stale-fallback 仍供词） ----
+
+  Future<void> _loadWords() async {
+    if (selectedConn == null) return;
+    try {
+      final tables = <String>[];
+      tableDb.clear();
+      for (final db in await be!.children(selectedConn!, [])) {
+        for (final t in await be!.children(selectedConn!, [db['name']])) {
+          tables.add('${t['name']}');
+          tableDb['${t['name']}'] = '${db['name']}';
+        }
+      }
+      words.setTables(tables);
+    } catch (_) {/* 供词失败不拦主流程 */}
+  }
+
+  Future<void> _fetchColumns(String table) async {
+    final db = tableDb[table];
+    if (db == null) return;
+    try {
+      final r = await be!.columns(selectedConn!, [db, table]);
+      words.setColumns(table, (r['columns'] as List).cast<Map<String, dynamic>>());
+    } catch (_) {/* 同上 */}
   }
 
   // ---- 布局 ----
@@ -314,7 +356,10 @@ class _HomePageState extends State<HomePage> {
               title: Text('${c['name']}'),
               subtitle: Text('${c['config']['driver']}',
                   style: const TextStyle(fontSize: 11)),
-              onTap: () => setState(() => selectedConn = id),
+              onTap: () {
+                setState(() => selectedConn = id);
+                _loadWords();
+              },
               trailing: PopupMenuButton<String>(
                 onSelected: (op) => op == 'edit'
                     ? _connDialog(old: c, oldId: id)
@@ -420,23 +465,23 @@ class _HomePageState extends State<HomePage> {
 
   Widget _queryPane() {
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      SizedBox(
+        height: 220,
+        child: CallbackShortcuts(
+          bindings: {
+            const SingleActivator(LogicalKeyboardKey.enter, meta: true): _runSql,
+            const SingleActivator(LogicalKeyboardKey.enter, control: true):
+                _runSql,
+          },
+          child: SqlEditor(controller: sql, words: words),
+        ),
+      ),
       Padding(
         padding: const EdgeInsets.all(8),
         child: Row(children: [
-          Expanded(
-            child: TextField(
-              controller: sql,
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
-              maxLines: 3,
-              minLines: 1,
-              decoration: const InputDecoration(
-                  isDense: true,
-                  hintText: 'SQL（仅当前选中连接）',
-                  border: OutlineInputBorder()),
-              onSubmitted: (_) => _runSql(),
-            ),
-          ),
-          const SizedBox(width: 8),
+          Text(selectedConn == null ? '未选连接' : '整段执行；有选中则只执行选中',
+              style: const TextStyle(fontSize: 11, color: Colors.grey)),
+          const Spacer(),
           FilledButton(
             onPressed: selectedConn == null || running ? null : _runSql,
             child: running

@@ -10,13 +10,16 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/lazygophers/lazydb/drivers/builtin"
 	"github.com/lazygophers/lazydb/internal/api"
 	"github.com/lazygophers/lazydb/internal/cache"
 	"github.com/lazygophers/lazydb/internal/conn"
+	"github.com/lazygophers/lazydb/internal/driverhost"
 	"github.com/lazygophers/lazydb/internal/mcpserver"
 	"github.com/lazygophers/lazydb/internal/runtimefile"
+	"github.com/lazygophers/lazydb/internal/source"
 )
 
 func main() {
@@ -76,8 +79,38 @@ func run() error {
 	}
 	defer store.Close()
 
-	h := api.New(conn.NewManager(builtin.Open), store, token)
+	// 驱动插件化（ADR-0002）：设 LAZYDB_DRIVER_INDEX 后，LAZYDB_PLUGIN_DRIVERS
+	// （csv，默认 mysql）里的驱动走 driverhost（索引→下载→独立进程），
+	// 其余仍走内置。不设则全内置，离线不受影响。
+	open := builtin.Open
+	if idx := os.Getenv("LAZYDB_DRIVER_INDEX"); idx != "" {
+		dh := driverhost.New(*home)
+		dh.IndexURL = idx
+		defer dh.Close()
+		plug := map[string]bool{}
+		for _, n := range strings.Split(envOr("LAZYDB_PLUGIN_DRIVERS", "mysql"), ",") {
+			if n = strings.TrimSpace(n); n != "" {
+				plug[n] = true
+			}
+		}
+		builtinOpen := open
+		open = func(cfg source.Config) (source.Source, error) {
+			if plug[cfg.Driver] {
+				return dh.OpenFunc()(cfg)
+			}
+			return builtinOpen(cfg)
+		}
+	}
+
+	h := api.New(conn.NewManager(open), store, token)
 	log.Printf("lazydb sidecar listening on %s", ln.Addr())
 	srv := &http.Server{Handler: h}
 	return srv.Serve(ln)
+}
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
 }
