@@ -100,26 +100,28 @@ func run() error {
 		return fmt.Errorf("open settings: %w", err)
 	}
 
-	// 驱动插件化（ADR-0002，#33 默认下载）：LAZYDB_PLUGIN_DRIVERS（默认 mysql）
-	// 里的驱动走 driverhost（索引→下载→独立进程）。索引 URL 优先级 =
+	// 驱动插件化（ADR-0002，#33 默认下载）：内置驱动直连（离线开箱即用）；
+	// LAZYDB_PLUGIN_DRIVERS（csv）里的驱动强制走 driverhost（索引→下载→独立进程），
+	// 其余内置不认的驱动也走 driverhost 按需下载。索引 URL 优先级 =
 	// 设置 driver_index_url > LAZYDB_DRIVER_INDEX > 默认官方索引；
 	// 离线且本地已装驱动时不联网直接用。
-	open := builtin.Open
 	dh := driverhost.New(*home)
 	dh.IndexURL = driverhost.ResolveIndexURL(set.Get().DriverIndexURL, os.Getenv("LAZYDB_DRIVER_INDEX"))
 	defer dh.Close()
 	plug := map[string]bool{}
-	for _, n := range strings.Split(envOr("LAZYDB_PLUGIN_DRIVERS", "mysql"), ",") {
+	for _, n := range strings.Split(envOr("LAZYDB_PLUGIN_DRIVERS", ""), ",") {
 		if n = strings.TrimSpace(n); n != "" {
 			plug[n] = true
 		}
 	}
-	builtinOpen := open
-	open = func(cfg source.Config) (source.Source, error) {
-		if plug[cfg.Driver] {
-			return dh.OpenFunc()(cfg)
+	builtinOpen := builtin.Open
+	open := func(cfg source.Config) (source.Source, error) {
+		if !plug[cfg.Driver] {
+			if src, err := builtinOpen(cfg); err == nil {
+				return src, nil
+			}
 		}
-		return builtinOpen(cfg)
+		return dh.OpenFunc()(cfg)
 	}
 
 	// 凭据与连接持久化（#25）：DSN 进 OS 钥匙串，磁盘只留元数据。

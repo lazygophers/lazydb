@@ -151,9 +151,6 @@ func (m *MySQL) Exec(ctx context.Context, stmt string, opts source.ExecOptions) 
 	return collectRows(rows, opts)
 }
 
-// ExecReadOnly（#30 只读执行）：语句在事务里跑并永远回滚，
-// 白名单挡不住的变体（如 WITH … DELETE）由回滚兜底。
-// 注意 MySQL DDL 会隐式提交绕过回滚——白名单首词拒绝仍是第一道，
 // ForeignKeys（#34）：information_schema 双表 JOIN，按约束名分组合成。
 func (m *MySQL) ForeignKeys(ctx context.Context, table source.Path) ([]source.ForeignKey, error) {
 	db, tbl := table[0], table[len(table)-1]
@@ -196,6 +193,9 @@ func (m *MySQL) ForeignKeys(ctx context.Context, table source.Path) ([]source.Fo
 	return out, rows.Err()
 }
 
+// ExecReadOnly（#30 只读执行）：语句在事务里跑并永远回滚，
+// 白名单挡不住的变体（如 WITH … DELETE）由回滚兜底。
+// 注意 MySQL DDL 会隐式提交绕过回滚——白名单首词拒绝仍是第一道，
 // DDL 动词不进白名单，走不到这里。
 func (m *MySQL) ExecReadOnly(ctx context.Context, stmt string, opts source.ExecOptions) (source.Result, error) {
 	tx, err := m.db.BeginTx(ctx, nil)

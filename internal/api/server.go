@@ -614,7 +614,6 @@ func (s *server) capabilities(w http.ResponseWriter, r *http.Request) {
 
 // ---- helpers ----
 
-// testConnection 不登记连接、只验证凭据能否打开并 Ping（「测试连接」按钮）。
 // ---- 设置（#29） ----
 
 func (s *server) getSettings(w http.ResponseWriter, _ *http.Request) {
@@ -642,6 +641,7 @@ func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.set.Get())
 }
 
+// testConnection 不登记连接、只验证凭据能否打开并 Ping（「测试连接」按钮）。
 func (s *server) testConnection(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Cfg source.Config `json:"config"`
