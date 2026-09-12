@@ -130,7 +130,8 @@ class Backend {
     try {
       final req = await _http.openUrl('POST', Uri.parse('$base/api/shutdown'));
       req.headers.set('Authorization', 'Bearer $token');
-      await req.close().drain<void>();
+      final res = await req.close();
+      await res.drain<void>();
     } catch (_) {/* 连接断开也视为已退 */}
   }
 
