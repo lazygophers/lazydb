@@ -44,7 +44,9 @@ jobs:
           sudo /usr/sbin/sshd -p 2222
           # 主机指纹（#31）：known_hosts 默认路径 + 显式指纹覆盖各验一条
           ssh-keyscan -p 2222 127.0.0.1 >> ~/.ssh/known_hosts
-          echo "LAZYDB_SSH_FINGERPRINT=$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}')" >> "$GITHUB_ENV"
+          # 指纹取 sshd 实际服务的 key（keyscan 来），不读磁盘文件——
+          # runner 的 sshd host key 路径与 /etc/ssh/ssh_host_ed25519_key.pub 不保证一致
+          echo "LAZYDB_SSH_FINGERPRINT=$(ssh-keyscan -p 2222 127.0.0.1 2>/dev/null | ssh-keygen -lf - | awk '/ED25519/{print $2; exit}')" >> "$GITHUB_ENV"
       - name: Vet
         run: go vet ./...
       - name: Test (unit + MySQL/SSH integration, SQLite test source)

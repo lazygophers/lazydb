@@ -58,10 +58,7 @@ func sshEnv(t *testing.T) *source.SSHConfig {
 		KeyPath:    key,
 		TargetHost: targetHost, TargetPort: targetPort,
 	}
-	if fp := os.Getenv("LAZYDB_SSH_FINGERPRINT"); fp != "" {
-		sc.HostKeySHA256 = fp
-	}
-	return sc
+	return sc // 指纹留空 = 走 known_hosts；显式指纹用例自己填 HostKeySHA256
 }
 
 func envOr(k, def string) string {
@@ -213,6 +210,7 @@ func TestMySQLFullChainTunnelFingerprint(t *testing.T) {
 		t.Skip("LAZYDB_SSH_FINGERPRINT not set; skipping fingerprint override test")
 	}
 	sc := sshEnv(t)
+	sc.HostKeySHA256 = os.Getenv("LAZYDB_SSH_FINGERPRINT")
 	ts, id := newSuiteServer(t, source.Config{Driver: "mysql", DSN: dsn, SSH: sc})
 	do(t, ts, "POST", fmt.Sprintf("/api/connections/%s/ping", id), nil, http.StatusOK)
 }
