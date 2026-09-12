@@ -52,12 +52,16 @@ func sshEnv(t *testing.T) *source.SSHConfig {
 	if p := os.Getenv("LAZYDB_SSH_TARGET_PORT"); p != "" {
 		fmt.Sscan(p, &targetPort)
 	}
-	return &source.SSHConfig{
+	sc := &source.SSHConfig{
 		Host: host, Port: port,
 		User:       envOr("LAZYDB_SSH_USER", "root"),
 		KeyPath:    key,
 		TargetHost: targetHost, TargetPort: targetPort,
 	}
+	if fp := os.Getenv("LAZYDB_SSH_FINGERPRINT"); fp != "" {
+		sc.HostKeySHA256 = fp
+	}
+	return sc
 }
 
 func envOr(k, def string) string {
@@ -200,6 +204,17 @@ func TestMySQLFullChainTunnel(t *testing.T) {
 	if !strings.Contains(string(csv), "\n1\n2\n") {
 		t.Fatalf("tunnel export = %q", csv)
 	}
+}
+
+// 显式指纹覆盖 known_hosts（#31）：配置了 host_key_sha256 时按它连。
+func TestMySQLFullChainTunnelFingerprint(t *testing.T) {
+	dsn := mysqlEnv(t)
+	if os.Getenv("LAZYDB_SSH_FINGERPRINT") == "" {
+		t.Skip("LAZYDB_SSH_FINGERPRINT not set; skipping fingerprint override test")
+	}
+	sc := sshEnv(t)
+	ts, id := newSuiteServer(t, source.Config{Driver: "mysql", DSN: dsn, SSH: sc})
+	do(t, ts, "POST", fmt.Sprintf("/api/connections/%s/ping", id), nil, http.StatusOK)
 }
 
 // 「测试连接」：对/错凭据分别返回明确结果。

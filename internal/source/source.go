@@ -23,6 +23,9 @@ type SSHConfig struct {
 	KeyPath    string `json:"key_path"`
 	TargetHost string `json:"target_host"`
 	TargetPort int    `json:"target_port"`
+	// HostKeySHA256 跳板机主机公钥指纹（SHA256:xxx，同 ssh-keygen -lf），
+	// 显式给出时优先于 known_hosts（#31）。空 = 走 known_hosts。
+	HostKeySHA256 string `json:"host_key_sha256,omitempty"`
 }
 
 // Path 是结构树上的位置：实例 → 库 → 表 …，逐级下钻。

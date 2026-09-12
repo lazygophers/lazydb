@@ -132,6 +132,7 @@ Future<void> showConnDialog(BuildContext context, Backend be,
   final sshHost = TextEditingController(text: oldSsh?['host'] ?? '');
   final sshUser = TextEditingController(text: oldSsh?['user'] ?? 'root');
   final sshKey = TextEditingController(text: oldSsh?['key_path'] ?? '');
+  final sshFp = TextEditingController(text: oldSsh?['host_key_sha256'] ?? '');
   final sshTarget =
       TextEditingController(text: oldSsh?['target_host'] ?? '127.0.0.1');
   String testMsg = '';
@@ -145,6 +146,8 @@ Future<void> showConnDialog(BuildContext context, Backend be,
             'port': sshPort,
             'user': sshUser.text,
             'key_path': sshKey.text,
+            if (sshFp.text.trim().isNotEmpty)
+              'host_key_sha256': sshFp.text.trim(),
             'target_host': sshTarget.text,
             'target_port': targetPort,
           },
@@ -206,6 +209,12 @@ Future<void> showConnDialog(BuildContext context, Backend be,
                   controller: sshKey,
                   decoration: const InputDecoration(
                       isDense: true, labelText: 'SSH 私钥文件路径')),
+              TextField(
+                  controller: sshFp,
+                  decoration: const InputDecoration(
+                      isDense: true,
+                      labelText: '主机指纹（选填，SHA256:…）',
+                      helperText: '留空按 ~/.ssh/known_hosts 校验')),
               Row(children: [
                 Expanded(
                     child: TextField(
@@ -265,5 +274,6 @@ Future<void> showConnDialog(BuildContext context, Backend be,
   sshHost.dispose();
   sshUser.dispose();
   sshKey.dispose();
+  sshFp.dispose();
   sshTarget.dispose();
 }

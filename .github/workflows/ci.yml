@@ -42,6 +42,9 @@ jobs:
           chmod 600 ~/.ssh/authorized_keys
           sudo mkdir -p /run/sshd
           sudo /usr/sbin/sshd -p 2222
+          # 主机指纹（#31）：known_hosts 默认路径 + 显式指纹覆盖各验一条
+          ssh-keyscan -p 2222 127.0.0.1 >> ~/.ssh/known_hosts
+          echo "LAZYDB_SSH_FINGERPRINT=$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}')" >> "$GITHUB_ENV"
       - name: Vet
         run: go vet ./...
       - name: Test (unit + MySQL/SSH integration, SQLite test source)

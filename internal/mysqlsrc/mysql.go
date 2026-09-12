@@ -4,16 +4,21 @@ package mysqlsrc
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/lazygophers/lazydb/internal/source"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // MySQL 数据源。SSH 隧道时持有 ssh client，Close 一并关掉。
@@ -309,12 +314,71 @@ func dialSSH(sc *source.SSHConfig) (*ssh.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse key: %w", err)
 	}
+	cb, err := hostKeyCallback(sc)
+	if err != nil {
+		return nil, err
+	}
 	cfg := &ssh.ClientConfig{
 		User:            sc.User,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // v1 跳板机信任交给使用者；known_hosts 校验后续加
+		HostKeyCallback: cb,
 	}
 	return ssh.Dial("tcp", net.JoinHostPort(sc.Host, fmt.Sprint(sc.Port)), cfg)
+}
+
+// hostKeyCallback 主机指纹校验（#31）：配置显式指纹优先于 known_hosts；
+// 两个来源都没有 = 拒连，不静默放行。
+func hostKeyCallback(sc *source.SSHConfig) (ssh.HostKeyCallback, error) {
+	addr := net.JoinHostPort(sc.Host, fmt.Sprint(sc.Port))
+	if sc.HostKeySHA256 != "" {
+		want, err := parseFingerprint(sc.HostKeySHA256)
+		if err != nil {
+			return nil, fmt.Errorf("host_key_sha256 格式错误（应为 SHA256:… 同 ssh-keygen -lf）：%w", err)
+		}
+		return func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			got := sha256.Sum256(key.Marshal())
+			if subtle.ConstantTimeCompare(got[:], want) == 1 {
+				return nil
+			}
+			return fmt.Errorf("跳板机 %s 主机指纹不匹配：期望 SHA256:%s，实际 SHA256:%s。跳板机确实换过密钥才更新指纹，否则可能是中间人",
+				addr, fpBase64(want), fpBase64(got[:]))
+		}, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("跳板机 %s 无法校验主机指纹：取不到主目录（%v）", addr, err)
+	}
+	path := filepath.Join(home, ".ssh", "known_hosts")
+	kh, err := knownhosts.New(path)
+	if err != nil {
+		return nil, fmt.Errorf("跳板机 %s 无法校验主机指纹：未配置 host_key_sha256 且读不了 %s（%v）。可执行 ssh-keyscan -p %d %s >> %s，或在连接配置里填 host_key_sha256",
+			addr, path, err, sc.Port, sc.Host, path)
+	}
+	return func(hostname string, a net.Addr, key ssh.PublicKey) error {
+		if err := kh(hostname, a, key); err != nil {
+			return fmt.Errorf("跳板机 %s 主机指纹校验失败：%v。跳板机确实换过密钥才从 %s 删旧条目重扫，否则可能是中间人",
+				addr, err, path)
+		}
+		return nil
+	}, nil
+}
+
+// parseFingerprint 解析 SHA256:xxx（前缀可省）为 32 字节。
+func parseFingerprint(s string) ([]byte, error) {
+	s = strings.TrimPrefix(s, "SHA256:")
+	b, err := base64.StdEncoding.WithPadding(base64.NoPadding).DecodeString(s)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) != sha256.Size {
+		return nil, fmt.Errorf("长度 %d 不是 SHA256", len(b))
+	}
+	return b, nil
+}
+
+// fpBase64 编成 OpenSSH 同款指纹串（SHA256: 后 base64 无填充）。
+func fpBase64(b []byte) string {
+	return base64.StdEncoding.WithPadding(base64.NoPadding).EncodeToString(b)
 }
 
 func quoteIdent(name string) string {
