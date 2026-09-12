@@ -16,7 +16,8 @@ import (
 )
 
 // ProtocolVersion 与主程序（driverhost）的协议版本协商基准。
-const ProtocolVersion = 1
+// v2（#30）：open 结果加 readonly 能力位，新增 exec_readonly 方法。
+const ProtocolVersion = 2
 
 type request struct {
 	ID     int             `json:"id"`
@@ -80,6 +81,7 @@ func handle(ctx context.Context, psrc *source.Source, req request) (any, string)
 			"columns":   supports(src, (*source.ColumnLister)(nil)),
 			"indexes":   supports(src, (*source.IndexLister)(nil)),
 			"ddl":       supports(src, (*source.DDLShower)(nil)),
+			"readonly":  supports(src, (*source.ReadOnlyExecer)(nil)),
 		}, ""
 	}
 	src := *psrc
@@ -117,6 +119,23 @@ func handle(ctx context.Context, psrc *source.Source, req request) (any, string)
 			return nil, err.Error()
 		}
 		res, err := src.Exec(ctx, p.SQL, source.ExecOptions{MaxRows: p.MaxRows})
+		if err != nil {
+			return nil, err.Error()
+		}
+		return res, ""
+	case "exec_readonly":
+		ro, ok := src.(source.ReadOnlyExecer)
+		if !ok {
+			return nil, "unsupported: exec_readonly"
+		}
+		var p struct {
+			SQL     string `json:"sql"`
+			MaxRows int    `json:"max_rows"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, err.Error()
+		}
+		res, err := ro.ExecReadOnly(ctx, p.SQL, source.ExecOptions{MaxRows: p.MaxRows})
 		if err != nil {
 			return nil, err.Error()
 		}

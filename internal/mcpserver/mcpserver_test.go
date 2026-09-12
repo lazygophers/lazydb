@@ -283,3 +283,44 @@ func TestMCPAndBackendShareCache(t *testing.T) {
 		t.Fatalf("quick_check = %q err=%v", chk, err)
 	}
 }
+
+// 白名单拒绝的错误含被拒语句首词（#30 第一道闸门，不往返数据库）。
+func TestMCPWriteDeniedMentionsVerb(t *testing.T) {
+	home := t.TempDir()
+	dsn := setupDB(t, home)
+	cs := newClient(t, home, false)
+	connID := connect(t, cs, dsn)
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "run_query",
+		Arguments: map[string]any{"conn": connID, "sql": "delete from orders"},
+	})
+	msg := textOf(t, res)
+	if err != nil {
+		msg = err.Error()
+	}
+	if !strings.Contains(msg, "delete") || !strings.Contains(msg, "--allow-write") {
+		t.Fatalf("error should mention verb and --allow-write: %q", msg)
+	}
+}
+
+// 只读模式：白名单放行的 CTE 藏写（WITH … DELETE）也被事务回滚拦下（#30）。
+func TestMCPReadOnlyRollbackCTEWrite(t *testing.T) {
+	home := t.TempDir()
+	dsn := setupDB(t, home)
+	cs := newClient(t, home, false)
+	connID := connect(t, cs, dsn)
+
+	res := call(t, cs, "run_query", map[string]any{
+		"conn": connID, "sql": "WITH v AS (SELECT 1) DELETE FROM orders",
+	})
+	if res.IsError {
+		t.Fatalf("cte delete should run (and rollback): %s", textOf(t, res))
+	}
+	res = call(t, cs, "run_query", map[string]any{
+		"conn": connID, "sql": "SELECT COUNT(*) AS n FROM orders",
+	})
+	if !strings.Contains(textOf(t, res), "2") {
+		t.Fatalf("count after rolled-back cte delete = %q, want 2", textOf(t, res))
+	}
+}

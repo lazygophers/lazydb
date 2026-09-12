@@ -98,7 +98,7 @@ jobs:
             mysql -uroot -e "CREATE DATABASE IF NOT EXISTS lazytest;"
             DSN="root@tcp(127.0.0.1:3306)/lazytest?timeout=5s"
           fi
-          LAZYDB_MYSQL_DSN="$DSN" go test -count=1 -timeout 120s -run 'TestMySQLFullChainDirect' ./internal/api/
+          LAZYDB_MYSQL_DSN="$DSN" go test -count=1 -timeout 120s -run 'TestMySQLFullChainDirect|TestMySQLReadOnlyRollbackCTEWrite' ./internal/api/
       - uses: actions/upload-artifact@v4
         with:
           name: lazydb-${{ matrix.goos }}-${{ matrix.goarch }}

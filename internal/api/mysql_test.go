@@ -3,6 +3,7 @@
 package api_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -235,5 +236,36 @@ func TestTestConnectionEndpoint(t *testing.T) {
 	json.Unmarshal(res, &ok)
 	if ok.OK || ok.Error == "" {
 		t.Fatalf("bad creds: ok=%v error=%q", ok.OK, ok.Error)
+	}
+}
+
+// 只读回滚（#30）：WITH … DELETE 绕过白名单首词，事务回滚兜底，COUNT 不变。
+func TestMySQLReadOnlyRollbackCTEWrite(t *testing.T) {
+	dsn := mysqlEnv(t)
+	src, err := builtin.Open(source.Config{Driver: "mysql", DSN: dsn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	ro, ok := src.(source.ReadOnlyExecer)
+	if !ok {
+		t.Fatal("mysql builtin has no ReadOnlyExecer")
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS ro_rollback (id INT PRIMARY KEY, v TEXT)`,
+		`TRUNCATE ro_rollback`,
+		`INSERT INTO ro_rollback VALUES (1,'a'), (2,'b')`,
+	} {
+		if _, err := src.Exec(context.Background(), stmt, source.ExecOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ro.ExecReadOnly(context.Background(),
+		`WITH c AS (SELECT 1) DELETE FROM ro_rollback`, source.ExecOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := src.Exec(context.Background(), `SELECT COUNT(*) FROM ro_rollback`, source.ExecOptions{})
+	if err != nil || len(res.Rows) != 1 || fmt.Sprint(res.Rows[0][0]) != "2" {
+		t.Fatalf("count after rollback = %+v err=%v, want 2", res, err)
 	}
 }

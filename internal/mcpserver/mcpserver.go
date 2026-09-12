@@ -242,8 +242,9 @@ func (h *hub) toolSearchSchema(s *mcp.Server) {
 	})
 }
 
-// 默认只读闸门（source.ReadVerb：首词白名单）。
-// ponytail: 首词判断挡不住 CTE 藏写等绕过，真闸门在 #24 之后的驱动只读模式。
+// 只读闸门两道（#30）：首词白名单快速拒绝（不往返数据库）；
+// 放行的语句若驱动实现 ReadOnlyExecer，则事务内执行并永远回滚，
+// 白名单挡不住的变体（如 WITH … DELETE）落不了盘。
 
 func (h *hub) toolRunQuery(s *mcp.Server) {
 	type args struct {
@@ -252,21 +253,31 @@ func (h *hub) toolRunQuery(s *mcp.Server) {
 		MaxRows int    `json:"max_rows,omitempty"`
 	}
 	mcp.AddTool(s, &mcp.Tool{
-		Name: "run_query", Description: "执行 SQL。默认只读：仅 SELECT/SHOW/DESCRIBE/EXPLAIN/WITH/PRAGMA 放行",
+		Name: "run_query", Description: "执行 SQL。默认只读：白名单外首词直接拒绝；放行的语句在事务内执行并回滚",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, a args) (*mcp.CallToolResult, any, error) {
 		c, err := h.m.Get(a.Conn)
 		if err != nil {
 			return nil, nil, err
 		}
-		if !h.allowWrite && !isReadOnly(a.SQL) {
+		if !h.allowWrite && !source.ReadVerb(a.SQL) {
 			return nil, nil, fmt.Errorf(
-				"写语句被拒绝（默认只读）。需要写入请让宿主以 --allow-write 启动 lazydb mcp-server")
+				"写语句被拒绝（默认只读）：首词 %q 不在只读白名单。需要写入请让宿主以 --allow-write 启动 lazydb mcp-server",
+				source.FirstVerb(a.SQL))
 		}
 		if a.MaxRows <= 0 {
 			a.MaxRows = 100
 		}
 		start := time.Now()
-		res, err := c.Src.Exec(ctx, a.SQL, source.ExecOptions{MaxRows: a.MaxRows})
+		var res source.Result
+		if !h.allowWrite {
+			if ro, ok := c.Src.(source.ReadOnlyExecer); ok {
+				res, err = ro.ExecReadOnly(ctx, a.SQL, source.ExecOptions{MaxRows: a.MaxRows})
+			} else {
+				res, err = c.Src.Exec(ctx, a.SQL, source.ExecOptions{MaxRows: a.MaxRows})
+			}
+		} else {
+			res, err = c.Src.Exec(ctx, a.SQL, source.ExecOptions{MaxRows: a.MaxRows})
+		}
 		e := history.Entry{
 			TS: time.Now().UnixMilli(), Conn: c.ID, SQL: a.SQL,
 			MS: time.Since(start).Milliseconds(), OK: err == nil,
@@ -282,8 +293,6 @@ func (h *hub) toolRunQuery(s *mcp.Server) {
 		return text(renderResult(res)), nil, nil
 	})
 }
-
-func isReadOnly(sql string) bool { return source.ReadVerb(sql) }
 
 // cachedNodes / cachedJSON 与 api.cached 同一套缓存优先逻辑（ADR-0004）。
 func cachedNodes(ctx context.Context, h *hub, c *conn.Conn, path source.Path) ([]source.Node, bool, error) {

@@ -6,6 +6,7 @@ package driverhost
 import (
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -46,7 +47,7 @@ func serveIndex(t *testing.T, mutate func(idx *Index, base string)) (url string)
 	idx := &Index{Drivers: map[string]Driver{
 		"sqlite": {
 			Version:  "1.0.0",
-			Protocol: [2]int{1, 1},
+			Protocol: [2]int{1, 2},
 			Platforms: map[string]Artifact{
 				goosArch(): {SHA256: sha256hex(bin)},
 			},
@@ -251,7 +252,7 @@ func TestHashMismatchRejected(t *testing.T) {
 func TestProtocolIncompatibleRejected(t *testing.T) {
 	url := serveIndex(t, func(idx *Index, base string) {
 		drv := idx.Drivers["sqlite"]
-		drv.Protocol = [2]int{2, 3}
+		drv.Protocol = [2]int{3, 4}
 		idx.Drivers["sqlite"] = drv
 	})
 	h := newHost(t, url, 0)
@@ -296,4 +297,28 @@ func copyFile(dst, src string) error {
 		return err
 	}
 	return os.Chmod(dst, 0o755)
+}
+
+// 只读执行经驱动代理全链路（#30）：WITH … DELETE 被事务回滚，数据不变。
+func TestPluginExecReadOnly(t *testing.T) {
+	url := serveIndex(t, nil)
+	h := newHost(t, url, 0)
+	dsn := setupDB(t)
+
+	src, err := h.Open(context.Background(), "sqlite", source.Config{Driver: "sqlite", DSN: dsn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ro, ok := src.(source.ReadOnlyExecer)
+	if !ok {
+		t.Fatal("ReadOnlyExecer not assembled")
+	}
+	if _, err := ro.ExecReadOnly(context.Background(),
+		"WITH v AS (SELECT 1) DELETE FROM orders", source.ExecOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := src.Exec(context.Background(), "SELECT COUNT(*) FROM orders", source.ExecOptions{})
+	if err != nil || len(res.Rows) != 1 || fmt.Sprint(res.Rows[0][0]) != "2" {
+		t.Fatalf("count after rollback = %+v err=%v", res, err)
+	}
 }

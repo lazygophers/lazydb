@@ -23,7 +23,8 @@ import (
 )
 
 // ProtocolVersion 是主程序侧的驱动协议版本（须落在索引声明的区间内）。
-const ProtocolVersion = 1
+// v2（#30）：open 结果加 readonly 能力位，新增 exec_readonly 方法。
+const ProtocolVersion = 2
 
 // DefaultIdleTimeout 驱动进程无请求多久后自动退出。
 const DefaultIdleTimeout = 5 * time.Minute
@@ -295,7 +296,7 @@ type client struct {
 	last   time.Time
 	dead   bool
 
-	cols, idxs, ddls bool
+	cols, idxs, ddls, ro bool
 }
 
 type wireResp struct {
@@ -344,6 +345,7 @@ type openResult struct {
 	Columns  bool `json:"columns"`
 	Indexes  bool `json:"indexes"`
 	DDL      bool `json:"ddl"`
+	ReadOnly bool `json:"readonly"`
 }
 
 func (c *client) open(cfg source.Config) (openResult, error) {
@@ -354,7 +356,7 @@ func (c *client) open(cfg source.Config) (openResult, error) {
 	if r.Protocol != ProtocolVersion {
 		return r, fmt.Errorf("驱动协议版本 %d 与主程序 %d 不符", r.Protocol, ProtocolVersion)
 	}
-	c.cols, c.idxs, c.ddls = r.Columns, r.Indexes, r.DDL
+	c.cols, c.idxs, c.ddls, c.ro = r.Columns, r.Indexes, r.DDL, r.ReadOnly
 	return r, nil
 }
 
@@ -411,6 +413,16 @@ func (c *client) Children(ctx context.Context, path source.Path) ([]source.Node,
 func (c *client) Exec(ctx context.Context, sql string, opts source.ExecOptions) (source.Result, error) {
 	var r source.Result
 	err := c.call(ctx, "exec", map[string]any{"sql": sql, "max_rows": opts.MaxRows}, &r)
+	return r, err
+}
+
+// ExecReadOnly（#30）：语句在驱动进程的事务里执行并永远回滚。
+func (c *client) ExecReadOnly(ctx context.Context, sql string, opts source.ExecOptions) (source.Result, error) {
+	if !c.ro {
+		return source.Result{}, fmt.Errorf("该数据源不支持只读执行")
+	}
+	var r source.Result
+	err := c.call(ctx, "exec_readonly", map[string]any{"sql": sql, "max_rows": opts.MaxRows}, &r)
 	return r, err
 }
 

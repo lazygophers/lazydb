@@ -8,15 +8,16 @@
 
 ```
 → {"id":1,"method":"open","params":{"driver":"mysql","dsn":"...","ssh":{...}}}
-← {"id":1,"result":{"protocol":1,"columns":true,"indexes":true,"ddl":true}}
+← {"id":1,"result":{"protocol":2,"columns":true,"indexes":true,"ddl":true,"readonly":true}}
 ```
 
 | method | params | 说明 |
 |---|---|---|
-| `open` | `source.Config`（driver/dsn/ssh） | 建连接；result 含协议版本与三个能力位 |
+| `open` | `source.Config`（driver/dsn/ssh） | 建连接；result 含协议版本与四个能力位 |
 | `ping` | — | 探活 |
 | `children` | `{"path":["main"]}` | 结构树逐层：空 path = 顶层（库），到表为止 |
 | `exec` | `{"sql":"...","max_rows":100}` | 执行；result = `source.Result`（columns/rows/truncated/rows_affected） |
+| `exec_readonly` | `{"sql":"...","max_rows":100}` | 事务内执行并永远回滚（#30）；仅 `open` readonly 位为 true 时可用 |
 | `columns` / `indexes` / `ddl` | `{"path":["db","table"]}` | 仅 `open` 能力位为 true 时可用 |
 | `close` | — | 关连接；之后进程可退出 |
 
@@ -26,7 +27,7 @@
 
 1. 实现接口（`internal/source`）：
    - `Source`：Open/Close/Ping/Children/Exec（必需）
-   - `ColumnLister`/`IndexLister`/`DDLShower`（可选，能力接口按需实现）
+   - `ColumnLister`/`IndexLister`/`DDLShower`/`ReadOnlyExecer`（可选，能力接口按需实现）
    - `RowStreamer`（可选，导出流式用）
 2. 服务端不用自己写循环：`driveragent.Run(ctx, os.Stdin, os.Stdout)`，它对 `open` 传进来的 Config 做 `builtin.Open` 式分发——把你的构造函数注册进 `drivers/builtin/builtin.go` 的 switch，或自己 fork 一份 `cmd/lazydb-driver` 做入口。
 3. 单测照抄 `internal/driverhost/host_test.go` 的 re-exec 模式：`TestMain` 里检查环境变量，子进程跑 `driveragent.Run`，父进程经 driverhost 全链路（下载/spawn/exec/回收）打真协议。
@@ -40,7 +41,7 @@
   "drivers": {
     "clickhouse": {
       "version": "1.0.0",
-      "protocol": [1, 1],
+      "protocol": [1, 2],
       "platforms": {
         "darwin-arm64": {"url": "https://…/lazydb-driver-clickhouse-darwin-arm64", "sha256": "…"}
       }

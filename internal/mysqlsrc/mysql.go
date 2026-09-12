@@ -27,6 +27,7 @@ var _ source.ColumnLister = (*MySQL)(nil)
 var _ source.IndexLister = (*MySQL)(nil)
 var _ source.DDLShower = (*MySQL)(nil)
 var _ source.RowStreamer = (*MySQL)(nil)
+var _ source.ReadOnlyExecer = (*MySQL)(nil)
 
 var dialSeq atomic.Int64
 
@@ -141,6 +142,29 @@ func (m *MySQL) Exec(ctx context.Context, stmt string, opts source.ExecOptions) 
 		return source.Result{}, err
 	}
 	defer rows.Close()
+	return collectRows(rows, opts)
+}
+
+// ExecReadOnly（#30 只读执行）：语句在事务里跑并永远回滚，
+// 白名单挡不住的变体（如 WITH … DELETE）由回滚兜底。
+// 注意 MySQL DDL 会隐式提交绕过回滚——白名单首词拒绝仍是第一道，
+// DDL 动词不进白名单，走不到这里。
+func (m *MySQL) ExecReadOnly(ctx context.Context, stmt string, opts source.ExecOptions) (source.Result, error) {
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return source.Result{}, err
+	}
+	defer tx.Rollback() //nolint:errcheck // 只读路径：回滚失败连接本身已不可信
+	rows, err := tx.QueryContext(ctx, stmt)
+	if err != nil {
+		return source.Result{}, err
+	}
+	defer rows.Close()
+	return collectRows(rows, opts)
+}
+
+// collectRows 读出结果集（MaxRows 截断；[]byte 转 string）。共享 Exec/ExecReadOnly。
+func collectRows(rows *sql.Rows, opts source.ExecOptions) (source.Result, error) {
 	cols, err := rows.Columns()
 	if err != nil {
 		return source.Result{}, err

@@ -21,6 +21,7 @@ type SQLite struct {
 var _ source.ColumnLister = (*SQLite)(nil)
 var _ source.IndexLister = (*SQLite)(nil)
 var _ source.DDLShower = (*SQLite)(nil)
+var _ source.ReadOnlyExecer = (*SQLite)(nil)
 
 func (s *SQLite) Open(_ context.Context, cfg source.Config) error {
 	if cfg.Driver != "sqlite" {
@@ -90,6 +91,27 @@ func (s *SQLite) Exec(ctx context.Context, stmt string, opts source.ExecOptions)
 		return source.Result{}, err
 	}
 	defer rows.Close()
+	return collectRows(rows, opts)
+}
+
+// ExecReadOnly（#30 只读执行）：语句在事务里跑并永远回滚。
+// 写语句经 QueryContext 拿到零列结果集，一样照跑照回滚。
+func (s *SQLite) ExecReadOnly(ctx context.Context, stmt string, opts source.ExecOptions) (source.Result, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return source.Result{}, err
+	}
+	defer tx.Rollback() //nolint:errcheck // 只读路径：回滚失败连接本身已不可信
+	rows, err := tx.QueryContext(ctx, stmt)
+	if err != nil {
+		return source.Result{}, err
+	}
+	defer rows.Close()
+	return collectRows(rows, opts)
+}
+
+// collectRows 读出结果集（MaxRows 截断）。共享 Exec/ExecReadOnly。
+func collectRows(rows *sql.Rows, opts source.ExecOptions) (source.Result, error) {
 	cols, err := rows.Columns()
 	if err != nil {
 		return source.Result{}, err

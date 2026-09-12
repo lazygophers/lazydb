@@ -94,18 +94,29 @@ type RowStreamer interface {
 	Stream(ctx context.Context, stmt string, header func(cols []string) error, row func([]any) error) error
 }
 
+// ReadOnlyExecer 只读执行能力接口（#30）：语句在事务里执行并永远回滚，
+// 白名单挡不住的变体（如 CTE 藏写）由回滚兜底。谁能谁实现。
+type ReadOnlyExecer interface {
+	ExecReadOnly(ctx context.Context, stmt string, opts ExecOptions) (Result, error)
+}
+
 // readVerbs 只读动词白名单。ReadVerb 按首词判断（MCP 默认只读闸门也用它）。
-// ponytail: 首词判断挡不住 CTE 藏写等绕过，真闸门在驱动只读模式上。
+// 只是快速拒绝第一道，真闸门在 ReadOnlyExecer 的事务回滚上。
 var readVerbs = map[string]bool{
 	"select": true, "show": true, "desc": true, "describe": true,
 	"explain": true, "with": true, "pragma": true, "use": true,
 }
 
-// ReadVerb 报告语句首词是否只读动词。
-func ReadVerb(sql string) bool {
+// FirstVerb 返回语句首词（小写），错误信息用。
+func FirstVerb(sql string) string {
 	s := strings.TrimSpace(sql)
 	if i := strings.IndexAny(s, " \t\r\n;("); i >= 0 {
 		s = s[:i]
 	}
-	return readVerbs[strings.ToLower(s)]
+	return strings.ToLower(s)
+}
+
+// ReadVerb 报告语句首词是否只读动词。
+func ReadVerb(sql string) bool {
+	return readVerbs[FirstVerb(sql)]
 }
