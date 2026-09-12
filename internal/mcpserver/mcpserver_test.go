@@ -112,7 +112,7 @@ func setupDB(t *testing.T, home string) string {
 	defer src.Close()
 	for _, stmt := range []string{
 		`CREATE TABLE orders (id INTEGER PRIMARY KEY, customer TEXT NOT NULL)`,
-		`CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT)`,
+		`CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT, orders_id INTEGER REFERENCES orders(id) ON DELETE CASCADE)`,
 		`CREATE UNIQUE INDEX idx_label ON items(label)`,
 		`INSERT INTO orders (customer) VALUES ('alice'), ('bob')`,
 	} {
@@ -446,5 +446,21 @@ func TestMCPSavedNoKeychain(t *testing.T) {
 	})
 	if !strings.Contains(textOf(t, res), "2") {
 		t.Fatalf("run_query after plain connect = %q", textOf(t, res))
+	}
+}
+
+// MCP 外键工具（#34）：与界面同一份缓存数据。
+func TestMCPListForeignKeys(t *testing.T) {
+	home := t.TempDir()
+	dsn := setupDB(t, home)
+	cs := newClient(t, home, false)
+	connID := connect(t, cs, dsn)
+
+	res := call(t, cs, "list_foreign_keys", map[string]any{
+		"conn": connID, "database": "main", "table": "items",
+	})
+	out := textOf(t, res)
+	if !strings.Contains(out, "orders") || !strings.Contains(out, "CASCADE") {
+		t.Fatalf("list_foreign_keys = %q", out)
 	}
 }

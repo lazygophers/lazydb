@@ -408,3 +408,75 @@ func TestBigSchemaCacheHitPerf(t *testing.T) {
 	}
 	t.Logf("10000-table cache hit: %v", elapsed)
 }
+
+// 外键端点（#34）：SQLite PRAGMA 出来的约束含列/引用表/引用列/动作。
+func TestForeignKeysEndpoint(t *testing.T) {
+	ts, _, _, dsn := newServer(t)
+	id := createConn(t, ts, dsn)
+	do(t, ts, "POST", fmt.Sprintf("/api/connections/%s/exec", id),
+		mustJSON(t, map[string]string{"sql": `CREATE TABLE child_t (pid INTEGER REFERENCES orders(id) ON DELETE SET NULL)`}), http.StatusOK)
+
+	var out struct {
+		Fks []source.ForeignKey `json:"foreign_keys"`
+	}
+	json.Unmarshal(do(t, ts, "GET", fmt.Sprintf("/api/connections/%s/foreign-keys?path=main&path=child_t", id), nil, http.StatusOK), &out)
+	if len(out.Fks) != 1 {
+		t.Fatalf("foreign keys = %+v", out.Fks)
+	}
+	fk := out.Fks[0]
+	if len(fk.Columns) != 1 || fk.Columns[0] != "pid" || fk.RefTable != "orders" ||
+		len(fk.RefColumns) != 1 || fk.RefColumns[0] != "id" || fk.OnDelete != "SET NULL" {
+		t.Fatalf("fk = %+v", fk)
+	}
+
+	// 不支持的数据源（brokenSource 无 ForeignKeyLister）→ 501 可读错误
+	dir := t.TempDir()
+	store, _ := cache.Open(dir)
+	t.Cleanup(func() { store.Close() })
+	m2 := conn.NewManager(func(cfg source.Config) (source.Source, error) { return brokenSource{}, nil })
+	ts2 := httptest.NewServer(api.New(m2, store, token, nil, nil))
+	t.Cleanup(ts2.Close)
+	body, _ := json.Marshal(map[string]any{"name": "t", "config": map[string]string{"driver": "sqlite", "dsn": dsn}})
+	res := do(t, ts2, "POST", "/api/connections", body, http.StatusCreated)
+	var c struct{ ID string }
+	json.Unmarshal(res, &c)
+	do(t, ts2, "GET", fmt.Sprintf("/api/connections/%s/foreign-keys?path=main&path=child_t", c.ID), nil, http.StatusNotImplemented)
+}
+
+// fkBrokenSource：实现外键接口但查询不可达（模拟断网，stale-fallback 用）。
+type fkBrokenSource struct{ brokenSource }
+
+func (fkBrokenSource) ForeignKeys(_ context.Context, _ source.Path) ([]source.ForeignKey, error) {
+	return nil, errUnreachable
+}
+
+// 外键 stale-fallback（#34）：断网后仍可看（v1 缓存同套语义）。
+func TestForeignKeysOfflineFromCache(t *testing.T) {
+	dir := t.TempDir()
+	ts, _, _, dsn := newServerAt(t, dir)
+	id := createConn(t, ts, dsn)
+	do(t, ts, "POST", fmt.Sprintf("/api/connections/%s/exec", id),
+		mustJSON(t, map[string]string{"sql": `CREATE TABLE child_t (pid INTEGER REFERENCES orders(id) ON DELETE CASCADE)`}), http.StatusOK)
+	do(t, ts, "GET", fmt.Sprintf("/api/connections/%s/foreign-keys?path=main&path=child_t", id), nil, http.StatusOK) // 预热
+
+	store, err := cache.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	m2 := conn.NewManager(func(cfg source.Config) (source.Source, error) { return fkBrokenSource{}, nil })
+	ts2 := httptest.NewServer(api.New(m2, store, token, nil, nil))
+	t.Cleanup(ts2.Close)
+	body, _ := json.Marshal(map[string]any{"name": "t", "config": map[string]string{"driver": "sqlite", "dsn": dsn}})
+	res := do(t, ts2, "POST", "/api/connections", body, http.StatusCreated)
+	var c struct{ ID string }
+	json.Unmarshal(res, &c)
+
+	var out struct {
+		Fks []source.ForeignKey `json:"foreign_keys"`
+	}
+	json.Unmarshal(do(t, ts2, "GET", fmt.Sprintf("/api/connections/%s/foreign-keys?path=main&path=child_t", c.ID), nil, http.StatusOK), &out)
+	if len(out.Fks) != 1 || out.Fks[0].RefTable != "orders" {
+		t.Fatalf("offline foreign keys = %+v", out.Fks)
+	}
+}

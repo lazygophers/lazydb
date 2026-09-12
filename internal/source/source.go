@@ -90,6 +90,21 @@ type DDLShower interface {
 	DDL(ctx context.Context, obj Path) (string, error)
 }
 
+// ForeignKey 描述一条外键约束（#34）。
+type ForeignKey struct {
+	Name       string   `json:"name"`        // 约束名（SQLite 无名则合成 fk_<id>）
+	Columns    []string `json:"columns"`     // 本表列
+	RefTable   string   `json:"ref_table"`   // 引用表
+	RefColumns []string `json:"ref_columns"` // 引用表列
+	OnDelete   string   `json:"on_delete"`   // CASCADE | SET NULL | NO ACTION …
+	OnUpdate   string   `json:"on_update"`
+}
+
+// ForeignKeyLister 外键能力接口（#34）：谁能谁实现。
+type ForeignKeyLister interface {
+	ForeignKeys(ctx context.Context, table Path) ([]ForeignKey, error)
+}
+
 // RowStreamer 是导出用能力接口（#24）：逐行回调，不整包进内存。
 type RowStreamer interface {
 	// Stream 执行语句：列名经 header 先送达（空结果也送），随后逐行回调 row。

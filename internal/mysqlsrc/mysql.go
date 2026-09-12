@@ -33,6 +33,7 @@ var _ source.IndexLister = (*MySQL)(nil)
 var _ source.DDLShower = (*MySQL)(nil)
 var _ source.RowStreamer = (*MySQL)(nil)
 var _ source.ReadOnlyExecer = (*MySQL)(nil)
+var _ source.ForeignKeyLister = (*MySQL)(nil)
 
 var dialSeq atomic.Int64
 
@@ -153,6 +154,48 @@ func (m *MySQL) Exec(ctx context.Context, stmt string, opts source.ExecOptions) 
 // ExecReadOnly（#30 只读执行）：语句在事务里跑并永远回滚，
 // 白名单挡不住的变体（如 WITH … DELETE）由回滚兜底。
 // 注意 MySQL DDL 会隐式提交绕过回滚——白名单首词拒绝仍是第一道，
+// ForeignKeys（#34）：information_schema 双表 JOIN，按约束名分组合成。
+func (m *MySQL) ForeignKeys(ctx context.Context, table source.Path) ([]source.ForeignKey, error) {
+	db, tbl := table[0], table[len(table)-1]
+	rows, err := m.db.QueryContext(ctx, `
+		SELECT kcu.constraint_name, kcu.column_name,
+		       kcu.referenced_table_name, kcu.referenced_column_name,
+		       rc.update_rule, rc.delete_rule
+		FROM information_schema.key_column_usage kcu
+		JOIN information_schema.referential_constraints rc
+		  ON kcu.constraint_schema = rc.constraint_schema
+		 AND kcu.constraint_name  = rc.constraint_name
+		WHERE kcu.table_schema = ? AND kcu.table_name = ?
+		ORDER BY kcu.constraint_name, kcu.ordinal_position`, db, tbl)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []source.ForeignKey{}
+	for rows.Next() {
+		var name, col, refTbl, refCol, onUpdate, onDelete string
+		if err := rows.Scan(&name, &col, &refTbl, &refCol, &onUpdate, &onDelete); err != nil {
+			return nil, err
+		}
+		var fk *source.ForeignKey
+		for i := range out {
+			if out[i].Name == name {
+				fk = &out[i]
+				break
+			}
+		}
+		if fk == nil {
+			out = append(out, source.ForeignKey{
+				Name: name, RefTable: refTbl, OnUpdate: onUpdate, OnDelete: onDelete,
+			})
+			fk = &out[len(out)-1]
+		}
+		fk.Columns = append(fk.Columns, col)
+		fk.RefColumns = append(fk.RefColumns, refCol)
+	}
+	return out, rows.Err()
+}
+
 // DDL 动词不进白名单，走不到这里。
 func (m *MySQL) ExecReadOnly(ctx context.Context, stmt string, opts source.ExecOptions) (source.Result, error) {
 	tx, err := m.db.BeginTx(ctx, nil)

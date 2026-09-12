@@ -58,10 +58,11 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // Kind：缓存对象的种类。
 const (
-	KindChildren = "children"
-	KindColumns  = "columns"
-	KindIndexes  = "indexes"
-	KindDDL      = "ddl"
+	KindChildren    = "children"
+	KindColumns     = "columns"
+	KindIndexes     = "indexes"
+	KindDDL         = "ddl"
+	KindForeignKeys = "foreign_keys"
 )
 
 // Entry 是一条缓存记录。

@@ -22,6 +22,7 @@ var _ source.ColumnLister = (*SQLite)(nil)
 var _ source.IndexLister = (*SQLite)(nil)
 var _ source.DDLShower = (*SQLite)(nil)
 var _ source.ReadOnlyExecer = (*SQLite)(nil)
+var _ source.ForeignKeyLister = (*SQLite)(nil)
 
 func (s *SQLite) Open(_ context.Context, cfg source.Config) error {
 	if cfg.Driver != "sqlite" {
@@ -252,6 +253,51 @@ func (s *SQLite) indexColumns(ctx context.Context, index string) ([]string, erro
 		out = append(out, name.String)
 	}
 	return out, rows.Err()
+}
+
+// ForeignKeys（#34）：PRAGMA foreign_key_list，按 id 分组合成约束。
+func (s *SQLite) ForeignKeys(ctx context.Context, table source.Path) ([]source.ForeignKey, error) {
+	rows, err := s.db.QueryContext(ctx,
+		fmt.Sprintf("PRAGMA foreign_key_list(%s)", quoteIdent(last(table))))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type raw struct {
+		id, seq                                       int
+		refTable, from, to, onUpdate, onDelete, match string
+	}
+	var raws []raw
+	for rows.Next() {
+		var r raw
+		if err := rows.Scan(&r.id, &r.seq, &r.refTable, &r.from, &r.to, &r.onUpdate, &r.onDelete, &r.match); err != nil {
+			return nil, err
+		}
+		raws = append(raws, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := []source.ForeignKey{}
+	for _, r := range raws {
+		var fk *source.ForeignKey
+		for i := range out {
+			if out[i].Name == fmt.Sprintf("fk_%d", r.id) {
+				fk = &out[i]
+				break
+			}
+		}
+		if fk == nil {
+			out = append(out, source.ForeignKey{
+				Name:     fmt.Sprintf("fk_%d", r.id),
+				RefTable: r.refTable, OnDelete: r.onDelete, OnUpdate: r.onUpdate,
+			})
+			fk = &out[len(out)-1]
+		}
+		fk.Columns = append(fk.Columns, r.from)
+		fk.RefColumns = append(fk.RefColumns, r.to)
+	}
+	return out, nil
 }
 
 // DDL 返回一个对象（表/视图/索引）的建表语句。

@@ -78,6 +78,7 @@ class _TreePaneState extends State<TreePane> {
           kids.addAll([
             TreeNode('字段', 'cols', n.path),
             TreeNode('索引', 'idx', n.path),
+            TreeNode('外键', 'fk', n.path),
             TreeNode('DDL', 'ddl', n.path),
           ]);
         case 'cols':
@@ -95,6 +96,14 @@ class _TreePaneState extends State<TreePane> {
             final u = i['unique'] == true ? 'UNIQUE ' : '';
             kids.add(TreeNode(
                 '$u${i['name']} (${(i['columns'] as List).join(', ')})',
+                'leaf',
+                n.path));
+          }
+        case 'fk': // 外键页签（#34）：列 → 引用表(列)，含 ON DELETE/UPDATE 动作
+          final r = await widget.be.foreignKeys(connId, n.path);
+          for (final f in r['foreign_keys']) {
+            kids.add(TreeNode(
+                '${(f['columns'] as List).join(', ')} → ${f['ref_table']}(${(f['ref_columns'] as List).join(', ')})  ON DELETE ${f['on_delete']} / ON UPDATE ${f['on_update']}',
                 'leaf',
                 n.path));
           }
@@ -170,7 +179,7 @@ class _TreePaneState extends State<TreePane> {
 
   Widget _treeNode(String connId, TreeNode n, int depth) {
     final expandable = switch (n.kind) {
-      'conn' || 'database' || 'table' || 'view' || 'cols' || 'idx' => true,
+      'conn' || 'database' || 'table' || 'view' || 'cols' || 'idx' || 'fk' => true,
       _ => false,
     };
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [

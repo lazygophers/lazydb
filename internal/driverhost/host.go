@@ -317,7 +317,7 @@ type client struct {
 	last   time.Time
 	dead   bool
 
-	cols, idxs, ddls, ro bool
+	cols, idxs, ddls, ro, fkeys bool
 }
 
 type wireResp struct {
@@ -367,6 +367,7 @@ type openResult struct {
 	Indexes  bool `json:"indexes"`
 	DDL      bool `json:"ddl"`
 	ReadOnly bool `json:"readonly"`
+	FKeys    bool `json:"fkeys"`
 }
 
 func (c *client) open(cfg source.Config) (openResult, error) {
@@ -377,7 +378,7 @@ func (c *client) open(cfg source.Config) (openResult, error) {
 	if r.Protocol != ProtocolVersion {
 		return r, fmt.Errorf("驱动协议版本 %d 与主程序 %d 不符", r.Protocol, ProtocolVersion)
 	}
-	c.cols, c.idxs, c.ddls, c.ro = r.Columns, r.Indexes, r.DDL, r.ReadOnly
+	c.cols, c.idxs, c.ddls, c.ro, c.fkeys = r.Columns, r.Indexes, r.DDL, r.ReadOnly, r.FKeys
 	return r, nil
 }
 
@@ -474,6 +475,17 @@ func (c *client) Indexes(ctx context.Context, path source.Path) ([]source.Index,
 	}
 	err := c.call(ctx, "indexes", map[string]any{"path": path}, &r)
 	return r.Indexes, err
+}
+
+func (c *client) ForeignKeys(ctx context.Context, path source.Path) ([]source.ForeignKey, error) {
+	if !c.fkeys {
+		return nil, fmt.Errorf("该数据源不支持外键")
+	}
+	var r struct {
+		Fks []source.ForeignKey `json:"foreign_keys"`
+	}
+	err := c.call(ctx, "foreign_keys", map[string]any{"path": path}, &r)
+	return r.Fks, err
 }
 
 func (c *client) DDL(ctx context.Context, path source.Path) (string, error) {

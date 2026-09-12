@@ -40,6 +40,7 @@ func NewWithSettings(m *conn.Manager, cs *cache.Store, token string, hist *histo
 	mux.HandleFunc("POST /api/connections/{id}/export", s.export)
 	mux.HandleFunc("GET /api/connections/{id}/columns", s.columns)
 	mux.HandleFunc("GET /api/connections/{id}/indexes", s.indexes)
+	mux.HandleFunc("GET /api/connections/{id}/foreign-keys", s.foreignKeys)
 	mux.HandleFunc("GET /api/connections/{id}/ddl", s.ddl)
 	mux.HandleFunc("GET /api/connections/{id}/search", s.search)
 	mux.HandleFunc("GET /api/connections/{id}/capabilities", s.capabilities)
@@ -494,6 +495,31 @@ func (s *server) indexes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"indexes": idxs})
 }
 
+func (s *server) foreignKeys(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.getConn(w, r)
+	if !ok {
+		return // getConn 已写响应
+	}
+	fl, ok2 := c.Src.(source.ForeignKeyLister)
+	if !ok2 {
+		writeErr(w, http.StatusNotImplemented, "unsupported", "source has no ForeignKeyLister")
+		return
+	}
+	p := pathParam(r)
+	fks, _, err := cached(s, r.Context(), c, p, cache.KindForeignKeys,
+		func(ctx context.Context) ([]source.ForeignKey, error) {
+			return fl.ForeignKeys(ctx, p)
+		})
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "sql_error", err.Error())
+		return
+	}
+	if fks == nil {
+		fks = []source.ForeignKey{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"foreign_keys": fks})
+}
+
 func (s *server) ddl(w http.ResponseWriter, r *http.Request) {
 	c, ok := s.getConn(w, r)
 	if !ok {
@@ -563,6 +589,12 @@ func (s *server) refresh(w http.ResponseWriter, r *http.Request) {
 				refreshed["ddl"] = true
 			}
 		}
+		if fl, ok := c.Src.(source.ForeignKeyLister); ok && s.store != nil {
+			if v, err := fl.ForeignKeys(r.Context(), p); err == nil {
+				_ = s.store.Save(r.Context(), c.Key(), req.Path, cache.KindForeignKeys, v, time.Now())
+				refreshed["foreign_keys"] = true
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"refreshed": refreshed})
 }
@@ -575,7 +607,8 @@ func (s *server) capabilities(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{
 		"columnLister": func() bool { _, ok := c.Src.(source.ColumnLister); return ok }(),
 		"indexLister":  func() bool { _, ok := c.Src.(source.IndexLister); return ok }(),
-		"ddlShower":    func() bool { _, ok := c.Src.(source.DDLShower); return ok }(),
+		"ddlShower":        func() bool { _, ok := c.Src.(source.DDLShower); return ok }(),
+		"foreignKeyLister": func() bool { _, ok := c.Src.(source.ForeignKeyLister); return ok }(),
 	})
 }
 

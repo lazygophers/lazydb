@@ -82,6 +82,7 @@ func handle(ctx context.Context, psrc *source.Source, req request) (any, string)
 			"indexes":   supports(src, (*source.IndexLister)(nil)),
 			"ddl":       supports(src, (*source.DDLShower)(nil)),
 			"readonly":  supports(src, (*source.ReadOnlyExecer)(nil)),
+			"fkeys":     supports(src, (*source.ForeignKeyLister)(nil)),
 		}, ""
 	}
 	src := *psrc
@@ -172,6 +173,22 @@ func handle(ctx context.Context, psrc *source.Source, req request) (any, string)
 			return nil, err.Error()
 		}
 		return map[string]any{"indexes": idxs}, ""
+	case "foreign_keys":
+		fl, ok := src.(source.ForeignKeyLister)
+		if !ok {
+			return nil, "unsupported: foreign_keys"
+		}
+		var p struct {
+			Path source.Path `json:"path"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, err.Error()
+		}
+		fks, err := fl.ForeignKeys(ctx, p.Path)
+		if err != nil {
+			return nil, err.Error()
+		}
+		return map[string]any{"foreign_keys": fks}, ""
 	case "ddl":
 		ds, ok := src.(source.DDLShower)
 		if !ok {

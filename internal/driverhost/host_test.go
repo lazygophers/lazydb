@@ -360,3 +360,39 @@ func TestOfflineWithInstalledDriverWorks(t *testing.T) {
 	}
 	_ = src.Close()
 }
+
+// 外键能力经驱动代理透传（#34）。
+func TestPluginForeignKeys(t *testing.T) {
+	url := serveIndex(t, nil)
+	h := newHost(t, url, 0)
+
+	home := t.TempDir()
+	dsn := filepath.Join(home, "fk.db")
+	var src sqlsrc.SQLite
+	if err := src.Open(context.Background(), source.Config{Driver: "sqlite", DSN: dsn}); err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE orders (id INTEGER PRIMARY KEY, customer TEXT NOT NULL)`,
+		`CREATE TABLE items (id INTEGER PRIMARY KEY, orders_id INTEGER REFERENCES orders(id) ON DELETE CASCADE)`,
+	} {
+		if _, err := src.Exec(context.Background(), stmt, source.ExecOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src.Close()
+
+	c, err := h.Open(context.Background(), "sqlite", source.Config{Driver: "sqlite", DSN: dsn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl, ok := c.(source.ForeignKeyLister)
+	if !ok {
+		t.Fatal("ForeignKeyLister not assembled")
+	}
+	fks, err := fl.ForeignKeys(context.Background(), source.Path{"main", "items"})
+	if err != nil || len(fks) != 1 || fks[0].RefTable != "orders" || fks[0].OnDelete != "CASCADE" {
+		t.Fatalf("foreign keys = %+v err=%v", fks, err)
+	}
+	_ = c.Close()
+}

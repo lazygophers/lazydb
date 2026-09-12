@@ -123,6 +123,9 @@ class Backend {
   Future<dynamic> indexes(String id, List<String> path) async =>
       _json('GET', '/api/connections/$id/indexes${_q(path)}');
 
+  Future<dynamic> foreignKeys(String id, List<String> path) async =>
+      _json('GET', '/api/connections/$id/foreign-keys${_q(path)}');
+
   Future<String> ddl(String id, List<String> path) async =>
       (await _json('GET', '/api/connections/$id/ddl${_q(path)}'))['ddl'] as String;
 

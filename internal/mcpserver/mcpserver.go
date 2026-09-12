@@ -64,6 +64,7 @@ func RunWithSecrets(ctx context.Context, home string, allowWrite bool, sec secre
 	h.toolListDatabases(srv)
 	h.toolListTables(srv)
 	h.toolListColumns(srv)
+	h.toolListForeignKeys(srv)
 	h.toolGetDDL(srv)
 	h.toolSearchSchema(srv)
 	h.toolRunQuery(srv)
@@ -227,6 +228,40 @@ func (h *hub) toolListColumns(s *mcp.Server) {
 				nullable = "NOT NULL"
 			}
 			fmt.Fprintf(&b, "%s\t%s\t%s\n", col.Name, col.Type, nullable)
+		}
+		return text(b.String()), nil, nil
+	})
+}
+
+// toolListForeignKeys（#34）：与界面同一份缓存。
+func (h *hub) toolListForeignKeys(s *mcp.Server) {
+	type args struct {
+		Conn     string `json:"conn"`
+		Database string `json:"database"`
+		Table    string `json:"table"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "list_foreign_keys", Description: "列出表的外键（列/引用表/引用列/动作）",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, a args) (*mcp.CallToolResult, any, error) {
+		c, err := h.m.Get(a.Conn)
+		if err != nil {
+			return nil, nil, err
+		}
+		fl, ok := c.Src.(source.ForeignKeyLister)
+		if !ok {
+			return nil, nil, fmt.Errorf("该数据源不支持外键")
+		}
+		p := source.Path{a.Database, a.Table}
+		fks, _, err := cachedJSON(ctx, h, c, p, cache.KindForeignKeys,
+			func(ctx context.Context) ([]source.ForeignKey, error) { return fl.ForeignKeys(ctx, p) })
+		if err != nil {
+			return nil, nil, err
+		}
+		var b strings.Builder
+		for _, fk := range fks {
+			fmt.Fprintf(&b, "%s\t(%s) → %s(%s)\tON DELETE %s ON UPDATE %s\n",
+				fk.Name, strings.Join(fk.Columns, ", "), fk.RefTable,
+				strings.Join(fk.RefColumns, ", "), fk.OnDelete, fk.OnUpdate)
 		}
 		return text(b.String()), nil, nil
 	})
