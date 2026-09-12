@@ -95,27 +95,31 @@ func run() error {
 	}
 	defer aud.Close()
 
-	// 驱动插件化（ADR-0002）：设 LAZYDB_DRIVER_INDEX 后，LAZYDB_PLUGIN_DRIVERS
-	// （csv，默认 mysql）里的驱动走 driverhost（索引→下载→独立进程），
-	// 其余仍走内置。不设则全内置，离线不受影响。
+	set, err := settings.Open(*home)
+	if err != nil {
+		return fmt.Errorf("open settings: %w", err)
+	}
+
+	// 驱动插件化（ADR-0002，#33 默认下载）：LAZYDB_PLUGIN_DRIVERS（默认 mysql）
+	// 里的驱动走 driverhost（索引→下载→独立进程）。索引 URL 优先级 =
+	// 设置 driver_index_url > LAZYDB_DRIVER_INDEX > 默认官方索引；
+	// 离线且本地已装驱动时不联网直接用。
 	open := builtin.Open
-	if idx := os.Getenv("LAZYDB_DRIVER_INDEX"); idx != "" {
-		dh := driverhost.New(*home)
-		dh.IndexURL = idx
-		defer dh.Close()
-		plug := map[string]bool{}
-		for _, n := range strings.Split(envOr("LAZYDB_PLUGIN_DRIVERS", "mysql"), ",") {
-			if n = strings.TrimSpace(n); n != "" {
-				plug[n] = true
-			}
+	dh := driverhost.New(*home)
+	dh.IndexURL = driverhost.ResolveIndexURL(set.Get().DriverIndexURL, os.Getenv("LAZYDB_DRIVER_INDEX"))
+	defer dh.Close()
+	plug := map[string]bool{}
+	for _, n := range strings.Split(envOr("LAZYDB_PLUGIN_DRIVERS", "mysql"), ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			plug[n] = true
 		}
-		builtinOpen := open
-		open = func(cfg source.Config) (source.Source, error) {
-			if plug[cfg.Driver] {
-				return dh.OpenFunc()(cfg)
-			}
-			return builtinOpen(cfg)
+	}
+	builtinOpen := open
+	open = func(cfg source.Config) (source.Source, error) {
+		if plug[cfg.Driver] {
+			return dh.OpenFunc()(cfg)
 		}
+		return builtinOpen(cfg)
 	}
 
 	// 凭据与连接持久化（#25）：DSN 进 OS 钥匙串，磁盘只留元数据。
@@ -128,11 +132,6 @@ func run() error {
 	m := conn.NewManager(open)
 	if err := connstore.Wire(m, sec, *home); err != nil {
 		log.Printf("恢复已存连接失败：%v", err)
-	}
-
-	set, err := settings.Open(*home)
-	if err != nil {
-		return fmt.Errorf("open settings: %w", err)
 	}
 
 	h := api.NewWithSettings(m, store, token, hist, aud, set)

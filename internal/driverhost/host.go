@@ -22,6 +22,20 @@ import (
 	"github.com/lazygophers/lazydb/internal/source"
 )
 
+// DefaultIndexURL 官方驱动索引兜底 URL（设置与环境变量都不给时用它）。
+const DefaultIndexURL = "https://lazygophers.github.io/lazydb-driver-index/index.json"
+
+// ResolveIndexURL（#33）：设置 > 环境变量 > 默认 URL。
+func ResolveIndexURL(settingURL, envURL string) string {
+	if settingURL != "" {
+		return settingURL
+	}
+	if envURL != "" {
+		return envURL
+	}
+	return DefaultIndexURL
+}
+
 // ProtocolVersion 是主程序侧的驱动协议版本（须落在索引声明的区间内）。
 // v2（#30）：open 结果加 readonly 能力位，新增 exec_readonly 方法。
 const ProtocolVersion = 2
@@ -165,15 +179,22 @@ func (h *Host) driverDir() string { return filepath.Join(h.Home, "drivers") }
 // 否则按索引下载并校验。
 func (h *Host) resolve(ctx context.Context, name string) (string, error) {
 	idx, err := h.fetchIndex(ctx)
+	dest := filepath.Join(h.driverDir(), name)
+	if err != nil {
+		// 索引拉不到（离线，#33）：本地已装直接用；没有才报错
+		if st, serr := os.Stat(dest); serr == nil && !st.IsDir() {
+			return dest, nil
+		}
+		if h.IndexURL == "" {
+			return "", fmt.Errorf("驱动 %s 本地未安装且未配索引", name)
+		}
+		return "", fmt.Errorf("驱动 %s 拉取索引失败（离线且本地未安装：%v）。索引 %s；或离线安装到 %s",
+			name, err, h.IndexURL, dest)
+	}
 	var drv Driver
 	var known bool
-	if err == nil {
-		drv, known = idx.Drivers[name]
-	} else if h.IndexURL != "" {
-		return "", fmt.Errorf("fetch driver index: %w", err)
-	}
+	drv, known = idx.Drivers[name]
 	key := runtime.GOOS + "/" + runtime.GOARCH
-	dest := filepath.Join(h.driverDir(), name)
 
 	if known {
 		if drv.Protocol[0] > ProtocolVersion || drv.Protocol[1] < ProtocolVersion {
@@ -197,7 +218,7 @@ func (h *Host) resolve(ctx context.Context, name string) (string, error) {
 	if st, err := os.Stat(dest); err == nil && !st.IsDir() {
 		return dest, nil
 	}
-	return "", fmt.Errorf("驱动 %s 不在索引中且本地未安装（%v）", name, err)
+	return "", fmt.Errorf("驱动 %s 不在索引中且本地未安装", name)
 }
 
 func (h *Host) fetchIndex(ctx context.Context) (*Index, error) {

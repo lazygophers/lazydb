@@ -34,7 +34,7 @@
 
 ## 发布（index）
 
-主程序从索引下载驱动二进制（`LAZYDB_DRIVER_INDEX` 指向 index JSON URL）：
+主程序从索引下载驱动二进制。索引 URL 优先级 = 设置 `driver_index_url` > `LAZYDB_DRIVER_INDEX` > 官方默认索引；离线且本地已装驱动时不联网直接用：
 
 ```json
 {

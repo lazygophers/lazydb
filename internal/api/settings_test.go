@@ -3,6 +3,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -80,4 +81,27 @@ func TestSettingsPutRoundtrip(t *testing.T) {
 func TestSettingsBadPut(t *testing.T) {
 	ts, _ := newSettingsServer(t)
 	do(t, ts, "PUT", "/api/settings", []byte(`{oops`), 400)
+}
+
+// driver_index_url（#33）：改 URL 回读，留空恢复默认。
+func TestSettingsDriverIndexURLRoundtrip(t *testing.T) {
+	ts, _ := newSettingsServer(t)
+	body, _ := json.Marshal(map[string]any{"keep_core_on_close": true, "driver_index_url": "http://mirror.local/index.json"})
+	do(t, ts, "PUT", "/api/settings", body, http.StatusOK)
+	var s settings.Settings
+	if err := json.Unmarshal(do(t, ts, "GET", "/api/settings", nil, http.StatusOK), &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.DriverIndexURL != "http://mirror.local/index.json" {
+		t.Fatalf("driver_index_url = %q", s.DriverIndexURL)
+	}
+	// 留空 = 恢复默认
+	body, _ = json.Marshal(map[string]any{"keep_core_on_close": true})
+	do(t, ts, "PUT", "/api/settings", body, http.StatusOK)
+	if err := json.Unmarshal(do(t, ts, "GET", "/api/settings", nil, http.StatusOK), &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.DriverIndexURL != "" {
+		t.Fatalf("cleared driver_index_url = %q, want empty (= default)", s.DriverIndexURL)
+	}
 }

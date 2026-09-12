@@ -322,3 +322,41 @@ func TestPluginExecReadOnly(t *testing.T) {
 		t.Fatalf("count after rollback = %+v err=%v", res, err)
 	}
 }
+
+// 索引 URL 优先级（#33）：设置 > 环境变量 > 默认。
+func TestResolveIndexURL(t *testing.T) {
+	for _, c := range []struct{ set, env, want string }{
+		{"http://s", "http://e", "http://s"}, // 设置压过环境变量
+		{"", "http://e", "http://e"},
+		{"", "", DefaultIndexURL},
+	} {
+		if got := ResolveIndexURL(c.set, c.env); got != c.want {
+			t.Fatalf("ResolveIndexURL(%q,%q) = %q, want %q", c.set, c.env, got, c.want)
+		}
+	}
+}
+
+// 索引不可达（离线）但本地已装：不联网直接用（#33）。
+func TestOfflineWithInstalledDriverWorks(t *testing.T) {
+	// 先经真索引装好本地驱动
+	url := serveIndex(t, nil)
+	h := newHost(t, url, 0)
+	dsn := setupDB(t)
+	if _, err := h.Open(context.Background(), "sqlite", source.Config{Driver: "sqlite", DSN: dsn}); err != nil {
+		t.Fatal(err)
+	}
+	h.Close()
+
+	// 换成不可达索引：同一个 Home（本地驱动还在），仍能用
+	h2 := &Host{Home: h.Home, clients: map[*client]struct{}{}, IndexURL: "http://127.0.0.1:1/none"}
+	h2.Spawn = h.Spawn
+	t.Cleanup(func() { _ = h2.Close() })
+	src, err := h2.Open(context.Background(), "sqlite", source.Config{Driver: "sqlite", DSN: dsn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.Exec(context.Background(), "SELECT 1", source.ExecOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	_ = src.Close()
+}
