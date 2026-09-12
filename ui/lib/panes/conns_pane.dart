@@ -39,6 +39,10 @@ class ConnsPane extends StatelessWidget {
                 exit(0);
               }),
           IconButton(
+              tooltip: '设置',
+              icon: const Icon(Icons.settings, size: 18),
+              onPressed: () => _settingsDialog(context)),
+          IconButton(
               tooltip: '新建连接',
               icon: const Icon(Icons.add),
               onPressed: () => showConnDialog(context, be, onSaved: onSaved)),
@@ -72,6 +76,46 @@ class ConnsPane extends StatelessWidget {
         ),
       ),
     ]);
+  }
+
+  Future<void> _settingsDialog(BuildContext context) async {
+    Map<String, dynamic> s;
+    try {
+      s = await be.getSettings();
+    } catch (_) {
+      s = {'keep_core_on_close': true};
+    }
+    if (!context.mounted) return;
+    await showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialog) => AlertDialog(
+          title: const Text('设置'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('关闭界面时保留后端核心'),
+              subtitle: const Text(
+                  '开：关界面后连接与缓存保活，重开秒进\n关：关界面时后端一并退出（含驱动进程）',
+                  style: TextStyle(fontSize: 11)),
+              value: s['keep_core_on_close'] == true,
+              onChanged: (v) async {
+                setDialog(() => s['keep_core_on_close'] = v);
+                try {
+                  final saved = await be.putSettings(s);
+                  setDialog(() => s = saved);
+                } catch (_) {/* 保存失败留原值，下次打开重读 */}
+              },
+            ),
+          ]),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('关闭')),
+          ],
+        ),
+      ),
+    );
   }
 }
 

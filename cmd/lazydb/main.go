@@ -23,6 +23,7 @@ import (
 	"github.com/lazygophers/lazydb/internal/mcpserver"
 	"github.com/lazygophers/lazydb/internal/runtimefile"
 	"github.com/lazygophers/lazydb/internal/secrets"
+	"github.com/lazygophers/lazydb/internal/settings"
 	"github.com/lazygophers/lazydb/internal/source"
 )
 
@@ -129,7 +130,12 @@ func run() error {
 		log.Printf("恢复已存连接失败：%v", err)
 	}
 
-	h := api.New(m, store, token, hist, aud)
+	set, err := settings.Open(*home)
+	if err != nil {
+		return fmt.Errorf("open settings: %w", err)
+	}
+
+	h := api.NewWithSettings(m, store, token, hist, aud, set)
 	log.Printf("lazydb sidecar listening on %s", ln.Addr())
 	root := http.NewServeMux()
 	root.Handle("/", h)

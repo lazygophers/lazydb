@@ -1,5 +1,7 @@
 // lazydb 桌面界面（#20 拆分 #28）：页面骨架 + 各面板状态协调。
 // 界面零业务逻辑：所有数据经 Backend 的 HTTP API（ADR-0001）。
+import 'dart:ui' show AppExitResponse;
+
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:re_editor/re_editor.dart';
@@ -38,7 +40,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Backend? be;
   String? bootError;
   List<dynamic> conns = [];
@@ -55,16 +57,31 @@ class _HomePageState extends State<HomePage> {
   bool exporting = false;
 
   @override
-  void dispose() {
-    sql.dispose();
-    super.dispose();
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    words.onTableMiss = _fetchColumns;
+    _boot();
+  }
+
+  // 设置「保留核心」关着时，退出界面连带退出后端（#29 / ADR-0007）。
+  @override
+  Future<AppExitResponse> didRequestAppExit() async {
+    final b = be;
+    if (b != null) {
+      try {
+        final s = await b.getSettings();
+        if (s['keep_core_on_close'] != true) await b.shutdown();
+      } catch (_) {/* 后端不在了正好 */}
+    }
+    return AppExitResponse.exit;
   }
 
   @override
-  void initState() {
-    super.initState();
-    words.onTableMiss = _fetchColumns;
-    _boot();
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    sql.dispose();
+    super.dispose();
   }
 
   Future<void> _boot() async {

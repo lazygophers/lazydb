@@ -15,6 +15,7 @@ import (
 	"github.com/lazygophers/lazydb/internal/cache"
 	"github.com/lazygophers/lazydb/internal/conn"
 	"github.com/lazygophers/lazydb/internal/history"
+	"github.com/lazygophers/lazydb/internal/settings"
 	"github.com/lazygophers/lazydb/internal/source"
 	"github.com/xuri/excelize/v2"
 )
@@ -22,7 +23,12 @@ import (
 // New 组装路由。cs 为 nil 时关缓存；token 非空时启用 Bearer 鉴权；
 // hist/aud 为 nil 时关历史/审计（测试可注入）。
 func New(m *conn.Manager, cs *cache.Store, token string, hist *history.Store, aud *audit.Logger) http.Handler {
-	s := &server{m: m, store: cs, token: token, ttl: cache.DefaultTTL, hist: hist, aud: aud}
+	return NewWithSettings(m, cs, token, hist, aud, nil)
+}
+
+// NewWithSettings：带设置存储（#29）。set 为 nil 时 GET 返回默认值、PUT 报不可用。
+func NewWithSettings(m *conn.Manager, cs *cache.Store, token string, hist *history.Store, aud *audit.Logger, set *settings.Store) http.Handler {
+	s := &server{m: m, store: cs, token: token, ttl: cache.DefaultTTL, hist: hist, aud: aud, set: set}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /api/connections", s.createConn)
@@ -45,6 +51,8 @@ func New(m *conn.Manager, cs *cache.Store, token string, hist *history.Store, au
 	if hist != nil {
 		mux.HandleFunc("GET /api/history", s.listHistory)
 	}
+	mux.HandleFunc("GET /api/settings", s.getSettings)
+	mux.HandleFunc("PUT /api/settings", s.putSettings)
 
 	return s.auth(mux)
 }
@@ -56,6 +64,7 @@ type server struct {
 	ttl   time.Duration
 	hist  *history.Store
 	aud   *audit.Logger
+	set   *settings.Store
 
 	idxMu sync.Mutex
 	idx   map[string]*searchIndex // connID → 内存索引（refresh 时作废）
@@ -573,6 +582,33 @@ func (s *server) capabilities(w http.ResponseWriter, r *http.Request) {
 // ---- helpers ----
 
 // testConnection 不登记连接、只验证凭据能否打开并 Ping（「测试连接」按钮）。
+// ---- 设置（#29） ----
+
+func (s *server) getSettings(w http.ResponseWriter, _ *http.Request) {
+	if s.set == nil {
+		writeJSON(w, http.StatusOK, settings.Default())
+		return
+	}
+	writeJSON(w, http.StatusOK, s.set.Get())
+}
+
+func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
+	if s.set == nil {
+		writeErr(w, http.StatusServiceUnavailable, "settings_unavailable", "本实例未接设置存储")
+		return
+	}
+	var n settings.Settings
+	if err := json.NewDecoder(r.Body).Decode(&n); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if err := s.set.Save(n); err != nil {
+		writeErr(w, http.StatusInternalServerError, "save_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, s.set.Get())
+}
+
 func (s *server) testConnection(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Cfg source.Config `json:"config"`

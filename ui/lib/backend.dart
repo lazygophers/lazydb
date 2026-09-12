@@ -91,6 +91,13 @@ class Backend {
 
   Future<void> health() async => _json('GET', '/api/health');
 
+  /// 设置（#29）：keep_core_on_close 等。
+  Future<Map<String, dynamic>> getSettings() async =>
+      (await _json('GET', '/api/settings')) as Map<String, dynamic>;
+
+  Future<Map<String, dynamic>> putSettings(Map<String, dynamic> s) async =>
+      (await _json('PUT', '/api/settings', body: s)) as Map<String, dynamic>;
+
   Future<List<dynamic>> listConnections() async =>
       (await _json('GET', '/api/connections')) as List<dynamic>;
 
