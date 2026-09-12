@@ -366,6 +366,13 @@ func dialSSH(sc *source.SSHConfig) (*ssh.Client, error) {
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostKeyCallback: cb,
 	}
+	if sc.HostKeySHA256 != "" {
+		// 钉死算法：指纹格式（SHA256:…）不含算法名，而 ssh 客户端默认
+		// ECDSA 排 ED25519 前，握手拿到的可能不是指纹对应那把 key
+		// （x/crypto ssh/common.go defaultHostKeyAlgos）。
+		// ponytail: 只钉 ED25519；要按 ECDSA 指纹校验时加算法声明字段
+		cfg.HostKeyAlgorithms = []string{ssh.KeyAlgoED25519}
+	}
 	return ssh.Dial("tcp", net.JoinHostPort(sc.Host, fmt.Sprint(sc.Port)), cfg)
 }
 
