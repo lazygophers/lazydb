@@ -262,6 +262,9 @@ func TestMySQLReadOnlyRollbackCTEWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer src.Close()
+	if err := src.Open(context.Background(), source.Config{Driver: "mysql", DSN: dsn}); err != nil {
+		t.Fatal(err)
+	}
 	ro, ok := src.(source.ReadOnlyExecer)
 	if !ok {
 		t.Fatal("mysql builtin has no ReadOnlyExecer")
