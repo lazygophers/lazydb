@@ -10,7 +10,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/lazygophers/lazydb/drivers/builtin"
 	"github.com/lazygophers/lazydb/internal/api"
@@ -55,9 +57,14 @@ func run() error {
 	addr := flag.String("addr", "127.0.0.1:0", "监听地址（默认随机端口）")
 	flag.Parse()
 
-	token, err := runtimefile.NewToken()
-	if err != nil {
-		return fmt.Errorf("gen token: %w", err)
+	var err error
+	// LAZYDB_TOKEN（开发热重启用）：固定令牌让界面在后端重启后无需重附着。
+	token := os.Getenv("LAZYDB_TOKEN")
+	if token == "" {
+		token, err = runtimefile.NewToken()
+		if err != nil {
+			return fmt.Errorf("gen token: %w", err)
+		}
 	}
 	if *home == "" {
 		*home, err = os.UserHomeDir()
@@ -146,6 +153,14 @@ func run() error {
 		w.WriteHeader(http.StatusNoContent)
 		go srv.Close()
 	})
+	// 信号退出走同一条路：Serve 返回 → defer 回收驱动代理等资源，
+	// 不留野进程（被 kill 重启时尤其重要，make run 依赖它）。
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		srv.Close()
+	}()
 	return srv.Serve(ln)
 }
 

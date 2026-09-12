@@ -1,3 +1,8 @@
 .ask-ui/
 .scratch/
 /lazydb
+/lazydb-driver
+/lazydb-dev
+/.backend.pid
+/.watch-go
+/.watch-dart
