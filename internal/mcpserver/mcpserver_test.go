@@ -16,16 +16,49 @@ import (
 
 	"github.com/lazygophers/lazydb/internal/cache"
 	"github.com/lazygophers/lazydb/internal/mcpserver"
+	"github.com/lazygophers/lazydb/internal/secrets"
 	"github.com/lazygophers/lazydb/internal/source"
 	"github.com/lazygophers/lazydb/internal/sqlsrc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// fakeSecStore：文件版假钥匙串（每 id 一个文件），只在测试注入。
+// 生产语义由 RunWithSecrets(sec=nil) 走「无钥匙串」分支覆盖。
+type fakeSecStore struct{ dir string }
+
+func (f fakeSecStore) Set(id, dsn string) error {
+	return os.WriteFile(filepath.Join(f.dir, id), []byte(dsn), 0o600)
+}
+
+func (f fakeSecStore) Get(id string) (string, error) {
+	b, err := os.ReadFile(filepath.Join(f.dir, id))
+	return string(b), err
+}
+
+func (f fakeSecStore) Delete(id string) error { return os.Remove(filepath.Join(f.dir, id)) }
+
+func (f fakeSecStore) Keys() ([]string, error) {
+	es, err := os.ReadDir(f.dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range es {
+		out = append(out, e.Name())
+	}
+	return out, nil
+}
+
 func TestMain(m *testing.M) {
 	if os.Getenv("LAZYDB_MCP_CHILD") == "1" {
 		home := os.Getenv("LAZYDB_MCP_HOME")
 		allowWrite := os.Getenv("LAZYDB_MCP_ALLOW_WRITE") == "true"
-		if err := mcpserver.Run(context.Background(), home, allowWrite); err != nil {
+		// 测试不碰真钥匙串：默认无钥匙串模式；设 FAKE_SEC_DIR 时注入文件假钥匙串
+		var sec secrets.Store
+		if d := os.Getenv("LAZYDB_MCP_FAKE_SEC_DIR"); d != "" {
+			sec = fakeSecStore{d}
+		}
+		if err := mcpserver.RunWithSecrets(context.Background(), home, allowWrite, sec); err != nil {
 			fmt.Fprintln(os.Stderr, "mcp child:", err)
 			os.Exit(1)
 		}
@@ -109,7 +142,7 @@ func TestMCPHandshakeAndListTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"connect": true, "list_connections": true, "list_databases": true,
+	want := map[string]bool{"connect": true, "list_connections": true, "connect_saved": true, "list_databases": true,
 		"list_tables": true, "list_columns": true, "get_ddl": true, "search_schema": true, "run_query": true}
 	got := map[string]bool{}
 	for _, tl := range tools.Tools {
@@ -128,12 +161,7 @@ func TestMCPAllToolsReadOnlyHappyPath(t *testing.T) {
 	cs := newClient(t, home, false)
 	connID := connect(t, cs, dsn)
 
-	var res *mcp.CallToolResult
-	res = call(t, cs, "list_connections", map[string]any{})
-	if !strings.Contains(textOf(t, res), "sqlite") {
-		t.Fatalf("list_connections = %q", textOf(t, res))
-	}
-	res = call(t, cs, "list_databases", map[string]any{"conn": connID})
+	res := call(t, cs, "list_databases", map[string]any{"conn": connID})
 	if !strings.Contains(textOf(t, res), "main") {
 		t.Fatalf("list_databases = %q", textOf(t, res))
 	}
@@ -322,5 +350,101 @@ func TestMCPReadOnlyRollbackCTEWrite(t *testing.T) {
 	})
 	if !strings.Contains(textOf(t, res), "2") {
 		t.Fatalf("count after rolled-back cte delete = %q, want 2", textOf(t, res))
+	}
+}
+
+// 存档连接（#32）：界面存两条后 MCP 能列、能连；凭据不泄漏。
+func TestMCPSavedConnections(t *testing.T) {
+	home := t.TempDir()
+	dsn := setupDB(t, home)
+	// DSN 带个明显标记，任何工具返回里出现它 = 泄漏
+	if !strings.Contains(dsn, "mcp.db") {
+		t.Fatalf("dsn = %q", dsn)
+	}
+	secDir := t.TempDir()
+	fake := fakeSecStore{dir: secDir}
+	if err := fake.Set("conn-a", dsn); err != nil {
+		t.Fatal(err)
+	}
+	if err := fake.Set("conn-b", dsn); err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Join(home, ".lazydb"), 0o700)
+	if err := os.WriteFile(filepath.Join(home, ".lazydb", "connections.json"),
+		[]byte(`[{"id":"conn-a","name":"本地A","driver":"sqlite"},{"id":"conn-b","name":"本地B","driver":"sqlite"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(),
+		"LAZYDB_MCP_CHILD=1", "LAZYDB_MCP_HOME="+home, "LAZYDB_MCP_ALLOW_WRITE=false",
+		"LAZYDB_MCP_FAKE_SEC_DIR="+secDir)
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "lazydb-test-client"}, nil).
+		Connect(context.Background(), &mcp.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "list_connections", Arguments: map[string]any{}})
+	var out string
+	if err != nil {
+		out = err.Error()
+	} else {
+		out = textOf(t, res)
+	}
+	if !strings.Contains(out, "本地A") || !strings.Contains(out, "本地B") {
+		t.Fatalf("list_connections = %q", out)
+	}
+	if strings.Contains(out, ".db") {
+		t.Fatalf("list_connections leaks dsn: %q", out)
+	}
+
+	res = call(t, cs, "connect_saved", map[string]any{"name": "本地A"})
+	connID, ok := strings.CutPrefix(textOf(t, res), "conn_id: ")
+	if !ok {
+		t.Fatalf("connect_saved = %q", textOf(t, res))
+	}
+	res = call(t, cs, "run_query", map[string]any{
+		"conn": strings.TrimSpace(connID), "sql": "SELECT COUNT(*) AS n FROM orders",
+	})
+	if !strings.Contains(textOf(t, res), "2") {
+		t.Fatalf("run_query on saved conn = %q", textOf(t, res))
+	}
+	if strings.Contains(textOf(t, res), "/a.db") || strings.Contains(res.Content[0].(*mcp.TextContent).Text, "conn-a") {
+		t.Fatalf("run_query leaks credential: %q", textOf(t, res))
+	}
+}
+
+// 无钥匙串后端（#32）：存档两个工具报可读错误，connect 不受影响。
+func TestMCPSavedNoKeychain(t *testing.T) {
+	home := t.TempDir()
+	dsn := setupDB(t, home)
+	cs := newClient(t, home, false)
+
+	for _, name := range []string{"list_connections", "connect_saved"} {
+		args := map[string]any{}
+		if name == "connect_saved" {
+			args["name"] = "x"
+		}
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+			Name: name, Arguments: args,
+		})
+		msg := ""
+		if err != nil {
+			msg = err.Error()
+		} else {
+			msg = textOf(t, res)
+		}
+		if !strings.Contains(msg, "钥匙串不可用") {
+			t.Fatalf("%s without keychain = %q", name, msg)
+		}
+	}
+	connID := connect(t, cs, dsn) // connect 仍可用
+	res := call(t, cs, "run_query", map[string]any{
+		"conn": connID, "sql": "SELECT COUNT(*) AS n FROM orders",
+	})
+	if !strings.Contains(textOf(t, res), "2") {
+		t.Fatalf("run_query after plain connect = %q", textOf(t, res))
 	}
 }

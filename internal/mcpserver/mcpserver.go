@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -14,13 +15,26 @@ import (
 	"github.com/lazygophers/lazydb/internal/audit"
 	"github.com/lazygophers/lazydb/internal/cache"
 	"github.com/lazygophers/lazydb/internal/conn"
+	"github.com/lazygophers/lazydb/internal/connstore"
 	"github.com/lazygophers/lazydb/internal/history"
+	"github.com/lazygophers/lazydb/internal/secrets"
 	"github.com/lazygophers/lazydb/internal/source"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Run 启动 stdio MCP server，阻塞直到客户端断开。
 func Run(ctx context.Context, home string, allowWrite bool) error {
+	sec, err := secrets.Open()
+	if err != nil {
+		log.Printf("钥匙串不可用（%v）：mcp-server 退化为临时连接模式", err)
+		sec = nil
+	}
+	return RunWithSecrets(ctx, home, allowWrite, sec)
+}
+
+// RunWithSecrets（#32）：sec 为 nil = 无钥匙串模式（list_connections /
+// connect_saved 报可读错误，connect 不受影响）。测试注入假钥匙串用。
+func RunWithSecrets(ctx context.Context, home string, allowWrite bool, sec secrets.Store) error {
 	store, err := cache.Open(home)
 	if err != nil {
 		return fmt.Errorf("open cache.db: %w", err)
@@ -37,11 +51,16 @@ func Run(ctx context.Context, home string, allowWrite bool) error {
 	}
 	defer aud.Close()
 
+	saved, _ := connstore.List(home)
 	srv := mcp.NewServer(&mcp.Implementation{Name: "lazydb", Version: "v1"}, nil)
-	h := &hub{m: conn.NewManager(builtin.Open), store: store, allowWrite: allowWrite, hist: hist, aud: aud}
+	h := &hub{
+		m: conn.NewManager(builtin.Open), store: store, allowWrite: allowWrite,
+		hist: hist, aud: aud, sec: sec, saved: saved,
+	}
 
 	h.toolConnect(srv)
 	h.toolListConnections(srv)
+	h.toolConnectSaved(srv)
 	h.toolListDatabases(srv)
 	h.toolListTables(srv)
 	h.toolListColumns(srv)
@@ -59,6 +78,8 @@ type hub struct {
 	allowWrite bool
 	hist       *history.Store
 	aud        *audit.Logger
+	sec        secrets.Store        // nil = 无钥匙串（#32 存档连接不可用）
+	saved      []connstore.Entry    // 启动时 connections.json 里的存档
 }
 
 func (h *hub) toolConnect(s *mcp.Server) {
@@ -83,15 +104,57 @@ func (h *hub) toolConnect(s *mcp.Server) {
 	})
 }
 
+// toolListConnections 列存档连接（#32）：只回 name/driver，绝不带 DSN。
 func (h *hub) toolListConnections(s *mcp.Server) {
 	mcp.AddTool(s, &mcp.Tool{
-		Name: "list_connections", Description: "列出本会话已建立的连接",
+		Name: "list_connections", Description: "列出已存档的连接（名称 + 驱动，无凭据）",
 	}, func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+		if h.sec == nil {
+			return nil, nil, fmt.Errorf("钥匙串不可用：列不出已存连接。仍可用 connect 临时连接")
+		}
 		var b strings.Builder
-		for _, c := range h.m.List() {
-			fmt.Fprintf(&b, "%s\t%s\t%s\n", c.ID, c.Name, c.Cfg.Driver)
+		for _, e := range h.saved {
+			fmt.Fprintf(&b, "%s\t%s\n", e.Name, e.Driver)
 		}
 		return text(b.String()), nil, nil
+	})
+}
+
+// toolConnectSaved（#32）：按名称取存档连接的 DSN 建连接。凭据只在钥匙串
+// 与驱动之间走，工具返回里只有 conn_id。
+func (h *hub) toolConnectSaved(s *mcp.Server) {
+	type args struct {
+		Name string `json:"name" jsonschema:"存档连接名（list_connections 列出的）"`
+	}
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "connect_saved", Description: "按名称连上已存档的连接，返回 conn_id",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, a args) (*mcp.CallToolResult, any, error) {
+		if h.sec == nil {
+			return nil, nil, fmt.Errorf("钥匙串不可用：连不上存档连接。仍可用 connect 临时连接")
+		}
+		var entry *connstore.Entry
+		for i := range h.saved {
+			if h.saved[i].Name == a.Name {
+				entry = &h.saved[i]
+				break
+			}
+		}
+		if entry == nil {
+			return nil, nil, fmt.Errorf("没有名为 %q 的存档连接（先 list_connections 看）", a.Name)
+		}
+		dsn, err := h.sec.Get(entry.ID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("取连接 %q 的凭据失败：%w", a.Name, err)
+		}
+		c, err := h.m.Add(ctx, entry.Name, source.Config{Driver: entry.Driver, DSN: dsn})
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := c.Src.Ping(ctx); err != nil {
+			_ = h.m.Remove(c.ID)
+			return nil, nil, fmt.Errorf("ping: %w", err)
+		}
+		return text(fmt.Sprintf("conn_id: %s", c.ID)), nil, nil
 	})
 }
 

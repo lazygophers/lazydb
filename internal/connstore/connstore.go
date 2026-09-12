@@ -75,6 +75,9 @@ func persist(m *conn.Manager, st secrets.Store, home string) {
 	}
 }
 
+// List 返回已存连接元数据（#32，MCP 只读用；不含凭据）。
+func List(home string) ([]Entry, error) { return load(home) }
+
 func load(home string) ([]Entry, error) {
 	b, err := os.ReadFile(filepath.Join(home, ".lazydb", "connections.json"))
 	if err != nil {
