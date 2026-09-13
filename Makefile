@@ -60,7 +60,7 @@ run: ## 开发模式：后端 + 界面一起跑，双侧监听热重启
 	( while sleep 1; do \
 		find ui/lib -name '*.dart' -newer .watch-dart 2>/dev/null | grep -q . || continue; \
 		touch .watch-dart; echo R; \
-	done ) | LAZYDB_BIN=$(CURDIR)/lazydb-dev flutter run -d $(DESKTOP)
+	done ) | ( cd ui && LAZYDB_BIN=$(CURDIR)/lazydb-dev flutter run -d $(DESKTOP) )
 
 build: build-go ## CGO_ENABLED=0 构建 Go 二进制 + flutter 桌面产物
 	cd ui && flutter build $(DESKTOP)
