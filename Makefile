@@ -29,7 +29,7 @@ run: ## 开发模式：后端 + 界面一起跑，双侧监听热重启
 	@CGO_ENABLED=0 go build -o lazydb-dev ./cmd/lazydb
 	@trap 'kill 0' INT TERM EXIT; \
 	backend_start() { \
-		./lazydb-dev -addr $(DEV_ADDR) & echo $$! > .backend.pid; \
+		LAZYDB_TOKEN=$(DEV_TOKEN) ./lazydb-dev -addr $(DEV_ADDR) & echo $$! > .backend.pid; \
 		for i in $$(seq 1 50); do \
 			curl -sf -H 'Authorization: Bearer $(DEV_TOKEN)' http://$(DEV_ADDR)/api/health >/dev/null && return 0; \
 			sleep 0.2; \
