@@ -76,8 +76,9 @@ jobs:
         shell: pwsh
       - name: Build driver agent + main
         run: |
+          # macOS Keychain 要求 cgo（见 Makefile 注释）；driver 不碰钥匙串，保持静态
           CGO_ENABLED=0 go build -o lazydb-driver-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }} ./cmd/lazydb-driver
-          CGO_ENABLED=0 go build -o lazydb-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }} ./cmd/lazydb
+          CGO_ENABLED=${{ matrix.goos == 'darwin' && '1' || '0' }} go build -o lazydb-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }} ./cmd/lazydb
         if: matrix.goos != 'windows'
         shell: bash
       # macOS/Windows 各跑通 MySQL 直连单链路（#25）；linux 由上面 test job 的

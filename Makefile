@@ -3,6 +3,9 @@
 
 UNAME := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 DESKTOP := $(if $(filter darwin,$(UNAME)),macos,linux)
+# macOS Keychain 后端要求 cgo（99designs/keyring keychain.go 带 darwin&&cgo
+# 构建标签），关掉 cgo 编出来的二进制不持久化连接凭据；其余平台保持静态。
+CGO := $(if $(filter darwin,$(UNAME)),1,0)
 
 # make run 开发模式常量：固定地址 + 固定令牌，后端重启后界面无需重附着
 DEV_ADDR := 127.0.0.1:52187
@@ -26,7 +29,7 @@ test: ## go 全量测试 + flutter widget 测试
 # Dart 改动 → 向 flutter run 的 stdin 发 R 触发热重启。
 # 注意：后端重启会丢连接（连接握在旧进程里），界面里重连即可。
 run: ## 开发模式：后端 + 界面一起跑，双侧监听热重启
-	@CGO_ENABLED=0 go build -o lazydb-dev ./cmd/lazydb
+	@CGO_ENABLED=$(CGO) go build -o lazydb-dev ./cmd/lazydb
 	@trap 'kill 0' INT TERM EXIT; \
 	backend_start() { \
 		LAZYDB_TOKEN=$(DEV_TOKEN) ./lazydb-dev -addr $(DEV_ADDR) & echo $$! > .backend.pid; \
@@ -54,7 +57,7 @@ run: ## 开发模式：后端 + 界面一起跑，双侧监听热重启
 		find cmd internal drivers -name '*.go' -newer .watch-go 2>/dev/null | grep -q . || continue; \
 		touch .watch-go; \
 		echo '[watch] Go 变化：重编并重启后端'; \
-		CGO_ENABLED=0 go build -o lazydb-dev ./cmd/lazydb || { echo '[watch] 编译失败，保留旧后端'; continue; }; \
+		CGO_ENABLED=$(CGO) go build -o lazydb-dev ./cmd/lazydb || { echo '[watch] 编译失败，保留旧后端'; continue; }; \
 		backend_kill; backend_start; \
 	done ) & \
 	( while sleep 1; do \
@@ -62,9 +65,9 @@ run: ## 开发模式：后端 + 界面一起跑，双侧监听热重启
 		touch .watch-dart; echo R; \
 	done ) | ( cd ui && LAZYDB_BIN=$(CURDIR)/lazydb-dev flutter run -d $(DESKTOP) )
 
-build: build-go ## CGO_ENABLED=0 构建 Go 二进制 + flutter 桌面产物
+build: build-go ## 构建 Go 二进制 + flutter 桌面产物
 	cd ui && flutter build $(DESKTOP)
 
 build-go: ## 只构建 Go 二进制（lazydb + lazydb-driver）
-	CGO_ENABLED=0 go build -o lazydb ./cmd/lazydb
-	CGO_ENABLED=0 go build -o lazydb-driver ./cmd/lazydb-driver
+	CGO_ENABLED=$(CGO) go build -o lazydb ./cmd/lazydb
+	CGO_ENABLED=$(CGO) go build -o lazydb-driver ./cmd/lazydb-driver
