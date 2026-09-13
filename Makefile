@@ -25,7 +25,8 @@ test: ## go 全量测试 + flutter widget 测试
 # Go 改动 → 重编 → TERM 旧后端（走优雅退出回收驱动代理）→ 起；
 # Dart 改动 → 向 flutter run 的 stdin 发 R 触发热重启。
 # 注意：后端重启会丢连接（连接握在旧进程里），界面里重连即可。
-run: build-go ## 开发模式：后端 + 界面一起跑，双侧监听热重启
+run: ## 开发模式：后端 + 界面一起跑，双侧监听热重启
+	@CGO_ENABLED=0 go build -o lazydb-dev ./cmd/lazydb
 	@trap 'kill 0' INT TERM EXIT; \
 	backend_start() { \
 		./lazydb-dev -addr $(DEV_ADDR) & echo $$! > .backend.pid; \
